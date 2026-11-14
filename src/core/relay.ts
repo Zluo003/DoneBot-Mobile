@@ -9,7 +9,7 @@ const text = new TextDecoder();
 
 export function relayUrl(host: string): string {
   if (__FIXTURE__ && /^127\.0\.0\.1:\d+$/.test(host)) return `ws://${host}/fixture-relay/phone`;
-  if (!/^relay[1-9][0-9]?\.donebot\.cn$/.test(host)) throw new Error("无法验证中继服务地址。");
+  if (!/^(donebot\.cn\/mobile-relay|relay[1-9][0-9]?\.donebot\.cn)$/.test(host)) throw new Error("无法验证中继服务地址。");
   return `wss://${host}/v1/phone`;
 }
 

@@ -31,6 +31,7 @@ export class MobileController {
   private booted = false;
   private cleanup: Array<() => void> = [];
   private visible = true;
+  private presenceAt = 0;
   readonly subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   readonly snapshot = () => this.state;
   constructor(readonly api: MobileApi, readonly platform: Platform, private connect: (descriptor: Awaited<ReturnType<MobileApi["connection"]>>) => Promise<WorkspaceConnection> = RelayConnection.connect) {}
@@ -82,6 +83,7 @@ export class MobileController {
   cancelChallenge(): void { this.update({ challenge: null, error: "" }); }
   private async signedIn(session: Session): Promise<void> {
     ++this.epoch;
+    this.presenceAt = 0;
     this.update({ session, phase: "ready", challenge: null, error: "" });
     await this.refresh(); this.openNotification(); void this.restorePush();
   }
@@ -113,6 +115,11 @@ export class MobileController {
     const epoch = this.epoch;
     const flight = (async () => {
       try {
+        if (Date.now() - this.presenceAt >= 15_000) {
+          await this.api.presence(this.platform.kind);
+          if (epoch !== this.epoch) return;
+          this.presenceAt = Date.now();
+        }
         const workspaces = await this.api.workspaces();
         if (epoch !== this.epoch) return;
         for (const [id] of this.connections) if (!workspaces.some(workspace => workspace.id === id && workspace.online)) this.evict(id);

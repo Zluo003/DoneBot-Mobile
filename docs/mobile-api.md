@@ -19,6 +19,12 @@
 
 以下接口必须使用用户 access token，并在服务端逐次验证账号与工作空间归属。工作空间 ID 不能作为授权。
 
+### PUT `/api/v1/donebot/mobile/session`
+
+请求 `{ "installationId": "random-installation-uuid", "name": "DoneBot iPhone", "platform": "ios" }`，注册当前有效登录会话及最近在线时间。App 前台约每 15 秒上报，平台还预留 `android` / `harmony` / `web`。该接口不依赖中继已配置，也不建立聊天连接。
+
+`GET /api/v1/donebot/devices` 供网关个人资料页显示 `{ desktop: [...], mobile: [...], relay_configured: true }`，只包含当前账号的安全元数据。手机进入后台后不承诺持续在线；登录记录和中继会话分别统计。
+
 ### GET `/api/v1/donebot/mobile/workspaces`
 
 ```json
@@ -37,12 +43,14 @@
 请求体 `{ "installationId": "random-installation-uuid" }`，返回桌面原版协议的连接描述：
 
 ```json
-{ "v": 1, "k": "P256-public-key-base64url", "h": "host-id-base64url", "r": ["relay1.donebot.cn"], "deviceToken": "omb_REDACTED" }
+{ "v": 1, "k": "P256-public-key-base64url", "h": "host-id-base64url", "r": ["donebot.cn/mobile-relay"], "deviceToken": "omb_REDACTED" }
 ```
 
 `k` 是 65 字节未压缩 P256 公钥，`h` 是 16 字节主机 ID，均为无填充 base64url。`deviceToken` 必须是这台手机获得授权后的原版设备会话凭据，具有原版会话范围、有效期和撤销能力。它不是网关 access token、网关安装密钥或模型密钥。中枢复核安装归属与原版 refresh family，只把凭据摘要交给运行服务。运行服务登记原版 client 会话并确认后才返回凭据；会话最长租约 70 秒，退出、账号安全版本变化与设备撤销会阻止续租。
 
-正式客户端只接受 `relay1.donebot.cn` 至 `relay99.donebot.cn`，使用 `wss://HOST/v1/phone` 和 `omb-relay.v1` 子协议。自有中继必须实现原版握手和双向字节转发。手机与电脑执行原版 Noise NKpsk0 / P256 / AES-GCM / SHA-256 握手，随后使用 yamux 承载 HTTP；消息正文和设备 bearer 在加密通道内传输。中继只需 admission，不应读取消息或接收网关密钥。
+正式客户端默认接受 `donebot.cn/mobile-relay`，使用 `wss://donebot.cn/mobile-relay/v1/phone` 和 `omb-relay.v1` 子协议；同时支持独立节点 `relay1.donebot.cn` 至 `relay99.donebot.cn`。网关下发最多 4 个可用地址，优先提供目标电脑当前节点，手机依次尝试。用户无需手动选择节点或扫码配对。代理将 `/mobile-relay/` 去前缀后转发到服务器回环端口 18080，网关继续使用 8080。iOS WebView 的 `capacitor://localhost` 和 Android 容器预留的 `https://localhost` Origin 被明确放行，任意网页 Origin 仍拒绝。
+
+自有中继实现原版握手和双向字节转发。手机与电脑执行原版 Noise NKpsk0 / P256 / AES-GCM / SHA-256 握手，随后使用 yamux 承载 HTTP；消息正文和设备 bearer 在加密通道内传输。中继只需 admission，不读取消息或接收网关密钥。
 
 首次取得的公钥与主机 ID 按账号、工作空间固定在 Keychain；后续变化拒绝连接。首次信任来自自有 HTTPS 账号服务，不能据此声称可抵御中枢首次授权被篡改。重新授权和密钥轮换的签名证明 / 可信重置流程仍需服务端设计与客户端后续接入，当前不会静默覆盖身份。
 
@@ -106,7 +114,7 @@ APNs 服务端须持有自己的 `.p8`、Key ID、Team ID 和 bundle topic `cn.d
 
 安装凭据通过原版网关 API Key 校验和 RuntimeInstallation 归属检查：
 
-- POST `/v1/donebot/runtime/mobile/heartbeat`：主机身份、公钥、名称及已接受授权摘要；回复短期中继 token、待授权设备摘要和最长 70 秒会话租约。
+- POST `/v1/donebot/runtime/mobile/heartbeat`：主机身份、公钥、名称、实际 `relayState` / `relayNode` 及已接受授权摘要；回复短期中继 token、待授权设备摘要、候选节点和最长 70 秒会话租约。
 - POST `/v1/donebot/runtime/mobile/events`：原会话落库后的 bot/thread/message ID，禁止发送正文。
 
 主机每 5 秒续约并确认手机授权；未确认的连接请求最长等待 12 秒后返回不可用。网关配置与上线步骤见同级 `donebot-api/docs/donebot-mobile.md`。

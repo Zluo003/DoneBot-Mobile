@@ -60,6 +60,10 @@ describe("desktop wire compatibility", () => {
     expect(() => relayUrl("relay1.openmausbot.com")).toThrow();
     expect(() => relayUrl("relay1.donebot.cn.attacker.test")).toThrow();
     expect(() => relayUrl("127.0.0.1:8888")).toThrow();
+    expect(relayUrl("donebot.cn/mobile-relay")).toBe("wss://donebot.cn/mobile-relay/v1/phone");
+    for (const host of ["donebot.cn/mobile-relay/../api", "donebot.cn/mobile-relay?redirect=x", "donebot.cn/mobile-relay.attacker.test", "donebot.cn:18080/mobile-relay"]) {
+      expect(() => relayUrl(host)).toThrow();
+    }
   });
 });
 

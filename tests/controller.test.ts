@@ -32,7 +32,7 @@ function fixture() {
     if (url.endsWith("/auth/login")) return Response.json({ access_token: "synthetic-access", refresh_token: "synthetic-refresh", expires_in: 3600, user: { id: "account", email: "fixture@donebot.test" } });
     if (url.endsWith("/mobile/workspaces")) return Response.json({ workspaces: [workspace] });
     if (url.endsWith("/connection")) return Response.json({ v: 1, k: vectors.V1.transportPublicB64u, h: vectors.V1.hostIdB64u, r: ["relay1.donebot.cn"], deviceToken: "omb_synthetic_only" });
-    if (url.endsWith("/subscription") || url.endsWith("/auth/logout")) return Response.json({ ok: true });
+    if (url.endsWith("/mobile/session") || url.endsWith("/subscription") || url.endsWith("/auth/logout")) return Response.json({ ok: true });
     throw new Error(`Unexpected fixture URL: ${url} ${options?.method}`);
   });
   vi.stubGlobal("fetch", fetcher);
@@ -135,7 +135,7 @@ describe("notification accounts and revocation", () => {
     const enabling = fx.controller.enablePush(), leaving = fx.controller.logout();
     expect(fx.controller.snapshot().session).toBeNull();
     held.resolve(fx.registration); await Promise.all([enabling, leaving]);
-    expect(fx.fetcher.mock.calls.some(([, options]) => options?.method === "PUT")).toBe(false);
+    expect(fx.fetcher.mock.calls.some(([url, options]) => url.endsWith("/subscription") && options?.method === "PUT")).toBe(false);
     expect(fx.controller.snapshot().phase).toBe("login");
   });
 

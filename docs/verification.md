@@ -79,4 +79,10 @@ pnpm control:omb messages --bot 490fd212-811f-4b29-af32-0e2bd8ea0553 --limit 5 -
 
 记录位于 `/Users/zluo/Dev/DoneBot/.omb-scratch/verify-evidence/mobile-hub/evidence.json`。本次成功桌面日志为 `/var/folders/wf/gs6jc_rd4qd_6_1jmqjkg1jh0000gn/T/donebot-verification-evidence/server-1794659938399-50968.log`。夹具已关闭，并清理自己创建的运行资料和数据库。
 
-APNs ES256 签名、沙盒目标、无效 token 与临时拒绝由内存 HTTP transport 验证；工作流通知发送使用合成通道，未向 Apple 发送真实推送。正式网关部署、真实 Cloud 节点、蜂窝网络和后台推送仍需在配置自有域名及 Apple 凭据后验收。
+APNs ES256 签名、沙盒目标、无效 token 与临时拒绝由内存 HTTP transport 验证；工作流通知发送使用合成通道，未向 Apple 发送真实推送。正式网关部署、真实 Cloud 节点、蜂窝网络和后台推送仍需在配置自有服务及 Apple 凭据后验收。
+
+## 同域名中继与节点管理
+
+补充隔离联调已通过：网关迁移 266、后台节点策略下发、同域名 `/mobile-relay/` 前缀代理、实际 `capacitor://localhost` WebSocket Origin、电脑和手机列表分组。一个在线电脑加一个手机会话的实际统计为 1 / 1 / 3；中继测试另验证一个电脑加两个手机会话为 1 / 2 / 5、超额拒绝、已有传输保留、节点凭据轮换及健康过期过滤。
+
+客户端 22 项测试、正式网页构建和 iOS 模拟器构建通过。中继 101 项测试通过，网关真实 PostgreSQL 及桌面消息链路通过。最新证据保留在同一 `evidence.json`，桌面日志为 `/var/folders/wf/gs6jc_rd4qd_6_1jmqjkg1jh0000gn/T/donebot-verification-evidence/server-1794664870891-75873.log`。

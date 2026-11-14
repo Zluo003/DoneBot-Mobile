@@ -89,6 +89,7 @@ const server = http.createServer(async (req, res) => {
       workspaceByToken.set(deviceToken, connection[1]);
       return json(res, 200, { v: 1, k: b64u(key.publicKey), h: b64u(hostId), r: [`127.0.0.1:${port}`], deviceToken });
     }
+    if (url.pathname === "/api/v1/donebot/mobile/session") return json(res, 200, { ok: true });
     if (url.pathname === "/api/v1/donebot/mobile/push/subscription") return json(res, 200, { ok: true });
     json(res, 404, {});
   } catch { json(res, 400, {}); }

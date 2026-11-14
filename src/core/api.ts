@@ -108,6 +108,9 @@ export class MobileApi {
     return result;
   }
   async workspaces() { return visibleWorkspaces(workspacesSchema.parse(await this.authorized("/api/v1/donebot/mobile/workspaces")).workspaces); }
+  async presence(platform: string): Promise<void> {
+    await this.authorized("/api/v1/donebot/mobile/session", { installationId: await this.installationId(), name: platform === "ios" ? "DoneBot iPhone" : "DoneBot Mobile", platform }, "PUT");
+  }
   async connection(id: string) { return descriptorSchema.parse(await this.authorized(`/api/v1/donebot/mobile/workspaces/${encodeURIComponent(id)}/connection`, { installationId: await this.installationId() })); }
   async installationId(): Promise<string> {
     if (this.installationFlight) return this.installationFlight;
