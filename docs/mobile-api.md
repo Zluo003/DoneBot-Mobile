@@ -1,0 +1,112 @@
+# 自有手机连接中枢契约 v1
+
+本契约的客户端、网关和运行服务连接器已实现并通过隔离联调，正式服务尚未上线。账号登录复用 DoneBot 网关；手机使用蜂窝网络访问 HTTPS / WSS 中枢，不依赖与电脑处于同一个 Wi-Fi。电脑必须运行 DoneBot 并保持向自有中继的出站连接；Cloud Bot 由其独立工作空间运行。切换查看位置不会迁移运行中的任务。
+
+## 现有账号接口
+
+网关 JSON 成功包裹 `{ "code": 0, "data": ... }`。客户端兼容裸数据响应，但正式服务应使用网关约定。
+
+| 方法与路径 | 请求 | 成功数据 |
+| --- | --- | --- |
+| POST `/api/v1/auth/login` | `email`, `password` | `access_token`, `refresh_token`, `expires_in`, `user` |
+| POST `/api/v1/auth/login/2fa` | `temp_token`, `totp_code` | 同登录 |
+| POST `/api/v1/auth/refresh` | `refresh_token` | 更新后的 token 和有效期 |
+| POST `/api/v1/auth/logout` | `refresh_token`，带原 access token | 成功回执 |
+
+需要二次验证时，登录返回 `{ "requires_2fa": true, "temp_token": "..." }`。`user` 至少包含 `id` 和 `email`。
+
+## 手机接口
+
+以下接口必须使用用户 access token，并在服务端逐次验证账号与工作空间归属。工作空间 ID 不能作为授权。
+
+### GET `/api/v1/donebot/mobile/workspaces`
+
+```json
+{
+  "workspaces": [
+    { "id": "computer-id", "name": "MacBook Pro", "kind": "computer", "online": true, "provisioned": true },
+    { "id": "cloud-id", "name": "DoneBot Cloud", "kind": "cloud", "online": true, "provisioned": true }
+  ]
+}
+```
+
+`kind` 为 `computer` 或 `cloud`。服务端从真实实例归属与开通状态投影 Cloud 列表；不创建未开通实例。客户端另有 `provisioned` 过滤。手机协议没有购买或开通接口。
+
+### POST `/api/v1/donebot/mobile/workspaces/:id/connection`
+
+请求体 `{ "installationId": "random-installation-uuid" }`，返回桌面原版协议的连接描述：
+
+```json
+{ "v": 1, "k": "P256-public-key-base64url", "h": "host-id-base64url", "r": ["relay1.donebot.cn"], "deviceToken": "omb_REDACTED" }
+```
+
+`k` 是 65 字节未压缩 P256 公钥，`h` 是 16 字节主机 ID，均为无填充 base64url。`deviceToken` 必须是这台手机获得授权后的原版设备会话凭据，具有原版会话范围、有效期和撤销能力。它不是网关 access token、网关安装密钥或模型密钥。中枢复核安装归属与原版 refresh family，只把凭据摘要交给运行服务。运行服务登记原版 client 会话并确认后才返回凭据；会话最长租约 70 秒，退出、账号安全版本变化与设备撤销会阻止续租。
+
+正式客户端只接受 `relay1.donebot.cn` 至 `relay99.donebot.cn`，使用 `wss://HOST/v1/phone` 和 `omb-relay.v1` 子协议。自有中继必须实现原版握手和双向字节转发。手机与电脑执行原版 Noise NKpsk0 / P256 / AES-GCM / SHA-256 握手，随后使用 yamux 承载 HTTP；消息正文和设备 bearer 在加密通道内传输。中继只需 admission，不应读取消息或接收网关密钥。
+
+首次取得的公钥与主机 ID 按账号、工作空间固定在 Keychain；后续变化拒绝连接。首次信任来自自有 HTTPS 账号服务，不能据此声称可抵御中枢首次授权被篡改。重新授权和密钥轮换的签名证明 / 可信重置流程仍需服务端设计与客户端后续接入，当前不会静默覆盖身份。
+
+### PUT `/api/v1/donebot/mobile/push/subscription`
+
+```json
+{
+  "installationId": "random-installation-uuid",
+  "platform": "ios",
+  "environment": "sandbox",
+  "token": "apns-device-token",
+  "preview": false
+}
+```
+
+注册由手机用户主动开启。服务端将安装 ID 和当前登录账号绑定，原子替换该安装旧账号的绑定；token 仅供推送使用。环境值为 `sandbox` / `production`，不得混用。后续 Android / Harmony 可复用契约形状，但需各自服务端发送通道。
+
+### DELETE `/api/v1/donebot/mobile/push/subscription`
+
+请求体 `{ "installationId": "..." }`。验证当前账号后幂等删除。退出登录等待已发起的订阅完成，再撤销订阅并注销系统推送。服务端还应在账号退出、会话撤销和设备撤销时清理绑定，不能依赖离线手机成功发出 DELETE。
+
+### DELETE `/api/v1/donebot/mobile/session`
+
+请求 `{ "installationId": "..." }`，撤销该账号当前登录会话绑定的手机、连接授权与推送目标。客户端退出时先调用，再退出原版账号；服务端还检查原版 refresh family，不能依赖此请求必达。
+
+## 推送事件与 APNs
+
+电脑 / Cloud 必须在新 Bot 消息落入原会话后向中枢提交经过设备鉴权的消息事件。中枢复核所属账号、工作空间、Bot 与会话，按 `messageId` 去重后发送 APNs alert；不能由手机声明一条消息属于谁。已按用户授权在原版消息入库及回合终止处接入事件调用点，仍由原版会话执行与权限机制处理消息。
+
+推荐 payload：
+
+```json
+{
+  "aps": { "alert": { "title": "DoneBot", "body": "Bot 有新消息" }, "sound": "default" },
+  "accountId": "account-id",
+  "workspaceId": "workspace-id",
+  "botId": "bot-id",
+  "threadId": "thread-id",
+  "messageId": "message-id"
+}
+```
+
+通知默认不包含消息正文。路由元数据会经过 Apple 推送服务；它不是端到端加密消息正文。App 只在账号匹配、目标 Bot 与线程可见时打开，随后从加密通道读取内容。App 前台刷新未读与会话；后台由 APNs 提醒，不依靠后台常驻 WebSocket 或静默推送保活。
+
+APNs 服务端须持有自己的 `.p8`、Key ID、Team ID 和 bundle topic `cn.donebot.mobile`，区分沙盒 / 生产环境，处理失效 token、去重与有限重试。这些密钥不进入手机工程。当前客户端不会显示“提醒已开启”，直到 token 已被中枢成功绑定。
+
+## 原版会话接口
+
+手机目前仅开放以下加密请求：
+
+- GET `/api/bots?messages=1`。
+- GET `/api/threads/:threadId/messages?limit=50[&before=:messageId]`。
+- POST `/api/bots/:botId/messages`，正文 `{ "text": "...", "threadId": "...", "sendId": "uuid" }`。
+- POST `/api/bots/:botId/read`，正文 `{ "threadId": "..." }`。
+
+读取原版 `unread: boolean` 和消息 `at` 毫秒时间戳。打开会话后固定线程，电脑端切换所选任务不改变手机发送目标。点击通知可进入该 Bot 可见任务中的指定线程，不修改电脑端的任务选择。
+
+发送失败保留草稿和 `sendId`，用户手动重试同一文本时沿用标识；客户端不自动重发发送请求。服务端必须继续使用原版去重和权限检查。手机只发送文本，复杂附件、权限卡片、工具操作由电脑端处理。
+
+## 已实现的运行服务接口
+
+安装凭据通过原版网关 API Key 校验和 RuntimeInstallation 归属检查：
+
+- POST `/v1/donebot/runtime/mobile/heartbeat`：主机身份、公钥、名称及已接受授权摘要；回复短期中继 token、待授权设备摘要和最长 70 秒会话租约。
+- POST `/v1/donebot/runtime/mobile/events`：原会话落库后的 bot/thread/message ID，禁止发送正文。
+
+主机每 5 秒续约并确认手机授权；未确认的连接请求最长等待 12 秒后返回不可用。网关配置与上线步骤见同级 `donebot-api/docs/donebot-mobile.md`。

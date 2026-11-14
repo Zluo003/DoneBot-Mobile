@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.build/
+.build-*.log
+.playwright-cli/
+.env*
+!.env.example
+output/
+.DS_Store
+ios/App/App/public/
+ios/App/App/capacitor.config.json
+ios/App/CapApp-SPM/.build/
+*.xcuserstate
+xcuserdata/
+*.p8
+*.mobileprovision
+*.p12
