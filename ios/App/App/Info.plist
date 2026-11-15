@@ -24,6 +24,12 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>DoneBotPushEnvironment</key>
 	<string>$(DONEBOT_PUSH_ENVIRONMENT)</string>
+    <key>NSCameraUsageDescription</key>
+    <string>拍摄照片并作为消息附件发送给你选择的 Bot。</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>选择照片并作为消息附件发送给你选择的 Bot。</string>
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>将你选择的消息图片或视频直接保存到手机图库。</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>

@@ -29,6 +29,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 class DoneBotViewController: CAPBridgeViewController {
     override func capacitorDidLoad() {
         bridge?.registerPluginInstance(DoneBotVaultPlugin())
+        bridge?.registerPluginInstance(DoneBotDocumentsPlugin())
     }
 }
 

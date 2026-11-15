@@ -4,7 +4,7 @@ import vectors from "./fixtures/e2e-v1.json";
 import { admission, b64u, credentialHash, keyId, psk } from "../src/desktop/credentials";
 import { CipherState, keyPairFromPrivate, phoneHello, RecordCipher } from "../src/desktop/noise";
 import { decodeFrame, encodeFrame } from "../src/desktop/yamux";
-import { decodeHttp, pinConnection, relayUrl } from "../src/core/relay";
+import { decodeHttp, pinConnection, relayUrl, responseError } from "../src/core/relay";
 
 const bytes = (hex: string) => Buffer.from(hex, "hex");
 describe("desktop wire compatibility", () => {
@@ -75,5 +75,28 @@ describe("HTTP carried inside E2E", () => {
   it("rejects truncated responses and compressed bytes", () => {
     expect(() => decodeHttp(Buffer.from('HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\n{}'))).toThrow("中断");
     expect(() => decodeHttp(Buffer.from('HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n{}'))).toThrow("编码");
+  });
+});
+
+describe("binary files over the encrypted connection", () => {
+  it("preserves arbitrary bytes, MIME and UTF-8 download names", () => {
+    const data = Buffer.from([0, 255, 13, 10, 128, 0]);
+    const reply = decodeHttp(Buffer.concat([Buffer.from("HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Disposition: attachment; filename*=UTF-8''%E8%A7%86%E9%A2%91.mp4\r\nContent-Length: 6\r\n\r\n"), data]), true);
+    expect(reply).toEqual({ status: 200, body: { data: new Uint8Array(data), mime: "video/mp4", name: "视频.mp4" } });
+  });
+  it("reads chunked binary without JSON decoding and retains HTTP failures", () => {
+    const reply = decodeHttp(Buffer.from("HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nTransfer-Encoding: chunked\r\n\r\n3\r\n\x00\xffA\r\n2\r\nBC\r\n0\r\n\r\n", "latin1"), true);
+    expect((reply.body as { data: Uint8Array }).data).toEqual(new Uint8Array([0, 255, 65, 66, 67]));
+    expect(decodeHttp(Buffer.from("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n"), true).status).toBe(403);
+  });
+  it("distinguishes an outdated mobile route from an unavailable file without exposing server paths", () => {
+    const body = JSON.stringify({ error: "mobile request refused" });
+    const reply = decodeHttp(Buffer.from(`HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\n\r\n${body}`), true);
+    expect(reply.body).toEqual({ error: "mobile request refused" });
+    expect(responseError(reply.status, reply.body, true).message).toContain("版本尚不支持");
+    expect(responseError(403, { error: "outside /private/secret" }, true).message).toBe("未能读取此附件，请重试或让 Bot 重新发送。");
+    expect(responseError(404, null, true).message).toContain("已移动或不存在");
+    const invalid = decodeHttp(Buffer.from("HTTP/1.1 503 Unavailable\r\nContent-Type: application/json\r\nContent-Length: 6\r\n\r\nbroken"), true);
+    expect(invalid.body).toBeNull();
   });
 });

@@ -12,6 +12,28 @@ const challengeSchema = z.object({ requires_2fa: z.literal(true), temp_token: z.
 const SESSION_KEY = "donebot.session.v1";
 const INSTALLATION_KEY = "donebot.mobile-installation.v1";
 
+async function errorReason(response: Response): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.length;
+      if (size > 4096) { void reader.cancel().catch(() => {}); return ""; }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+    const value: unknown = JSON.parse(new TextDecoder().decode(bytes));
+    return z.object({ reason: z.string().max(80) }).safeParse(value).data?.reason ?? "";
+  } catch { return ""; }
+  finally { reader.releaseLock(); }
+}
+
 export class ApiError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
 }
@@ -35,9 +57,8 @@ export class MobileApi {
     if (epoch !== this.epoch || !saved) return this.session;
     try { this.session = sessionSchema.parse(JSON.parse(saved)); }
     catch { await this.persist(null); return null; }
-    if (this.session.expiresAt <= Date.now() + 60_000) {
-      try { await this.refresh(); } catch { if (epoch === this.epoch) { this.session = null; await this.persist(null); } }
-    }
+    // Restore local identity without requiring a network. Authorized requests refresh
+    // expired credentials before sending; cached conversations remain readable offline.
     return this.session;
   }
   async raw(path: string, body?: unknown, token?: string, method?: string): Promise<unknown> {
@@ -47,7 +68,13 @@ export class MobileApi {
       body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(20_000),
     });
     if (!response.ok) {
-      const text = response.status === 401 ? (path === "/api/v1/auth/login" ? "邮箱或密码不正确。" : path === "/api/v1/auth/login/2fa" ? "验证码不正确或已过期。" : "登录状态已失效，请重新登录。") : response.status === 404 || response.status === 501
+      const reason = await errorReason(response);
+      const subscription = path === "/api/v1/donebot/mobile/push/subscription";
+      const text = subscription && response.status === 503 && ["", "MOBILE_PUSH_UNAVAILABLE"].includes(reason)
+        ? "网关尚未启用 Apple 消息推送，请在管理后台配置 APNs 后重试。"
+        : reason === "MOBILE_RELAY_OFFLINE" ? "中继节点暂时离线，请稍后重新连接。"
+        : reason === "MOBILE_UNAVAILABLE" ? "网关尚未配置手机连接，请联系管理员。"
+        : response.status === 401 ? (path === "/api/v1/auth/login" ? "邮箱或密码不正确。" : path === "/api/v1/auth/login/2fa" ? "验证码不正确或已过期。" : "登录状态已失效，请重新登录。") : response.status === 404 || response.status === 501
         ? "手机连接服务尚未启用，请稍后重试。" : response.status === 429 ? "操作较频繁，请稍后重试。" : "暂时无法完成请求，请稍后重试。";
       throw new ApiError(response.status, text);
     }

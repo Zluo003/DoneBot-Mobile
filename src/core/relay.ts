@@ -2,9 +2,10 @@ import { Buffer } from "buffer";
 import { admission, b64u, credentialHash, fromB64u, keyId, psk } from "../desktop/credentials";
 import { encodePayload1, isPublicKey, newConn, NoiseError, phoneHello, type PhoneHello, type SessionKeys } from "../desktop/noise";
 import { decodeFrame, encodeFrame, Mux } from "../desktop/yamux";
-import type { ConnectionDescriptor, SecureVault, WorkspaceConnection } from "./contracts";
+import type { ConnectionDescriptor, SecureVault, WorkspaceConnection, RequestOptions } from "./contracts";
 
 const MAX_RESPONSE = 8 * 1024 * 1024;
+export const MAX_FILE_BYTES = 100 * 1024 * 1024;
 const text = new TextDecoder();
 
 export function relayUrl(host: string): string {
@@ -24,7 +25,7 @@ export async function pinConnection(vault: SecureVault, accountId: string, works
   if (!saved) await vault.write(key, pin);
 }
 
-export function decodeHttp(bytes: Uint8Array): { status: number; body: unknown } {
+export function decodeHttp(bytes: Uint8Array, binary = false): { status: number; body: unknown } {
   const raw = Buffer.from(bytes);
   const boundary = raw.indexOf("\r\n\r\n");
   if (boundary < 0 || boundary > 32 * 1024) throw new Error("设备返回的消息不完整。");
@@ -52,11 +53,36 @@ export function decodeHttp(bytes: Uint8Array): { status: number; body: unknown }
     const length = /^content-length:\s*(\d+)\s*$/im.exec(headers);
     if (length && body.length !== Number(length[1])) throw new Error("设备响应中断。");
   }
-  return { status, body: body.length ? JSON.parse(text.decode(body)) : null };
+  if (!binary) return { status, body: body.length ? JSON.parse(text.decode(body)) : null };
+  if (status < 200 || status >= 300) {
+    let detail: unknown = null;
+    if (body.length <= 64 * 1024 && /^content-type:[ \t]*application\/json\b/im.test(headers)) {
+      try { detail = JSON.parse(text.decode(body)); } catch { }
+    }
+    return { status, body: detail };
+  }
+  const mime = /^content-type:[ \t]*([^\r\n]+)/im.exec(headers)?.[1].trim() || "application/octet-stream";
+  const disposition = /^content-disposition:[ \t]*([^\r\n]+)/im.exec(headers)?.[1] ?? "";
+  let name = /filename="([^"]+)"/i.exec(disposition)?.[1] ?? "";
+  const encoded = /filename\*=UTF-8''([^;\s]+)/i.exec(disposition)?.[1];
+  if (encoded) { try { name = decodeURIComponent(encoded); } catch { } }
+  return { status, body: { data: new Uint8Array(body), mime, name } };
+}
+
+export function responseError(status: number, body: unknown, binary = false): Error {
+  const detail = body && typeof body === "object" && "error" in body ? body.error : undefined;
+  if (binary) {
+    if (status === 403 && detail === "mobile request refused") return new Error("此电脑或 Cloud 的版本尚不支持此手机操作，请更新后重试。");
+    if (status === 404) return new Error("文件已移动或不存在，请让 Bot 重新发送。");
+    if (status === 413) return new Error("文件超过手机端的读取上限。");
+    if (status === 401) return new Error("连接已失效，请返回列表重新连接。");
+    return new Error("未能读取此附件，请重试或让 Bot 重新发送。");
+  }
+  return new Error(status === 403 ? "连接暂时不可用，请返回列表重新连接。" : status === 409 ? "当前会话暂时无法发送，请稍后重试。" : "设备未能完成请求，请刷新后重试。");
 }
 
 interface Pending {
-  chunks: Buffer[]; bytes: number; outgoing: Buffer;
+  chunks: Buffer[]; bytes: number; outgoing: Buffer; binary: boolean; limit: number;
   resolve(value: unknown): void; reject(error: Error): void; cleanup(): void;
 }
 
@@ -119,7 +145,7 @@ export class RelayConnection implements WorkspaceConnection {
         const pending = this.pending.get(id);
         if (!pending) return;
         pending.bytes += data.length;
-        if (pending.bytes > MAX_RESPONSE) { this.mux!.reset(id); return; }
+        if (pending.bytes > pending.limit) { this.failRequest(id, new Error(pending.binary ? "文件超过手机端 100 MB 的读取上限。" : "设备返回的消息过大。")); return; }
         pending.chunks.push(Buffer.from(data)); this.mux!.consumed(id, data.length);
       },
       ended: id => {
@@ -128,8 +154,8 @@ export class RelayConnection implements WorkspaceConnection {
         pending.cleanup(); this.pending.delete(id);
         this.mux!.finish(id);
         try {
-          const reply = decodeHttp(Buffer.concat(pending.chunks));
-          if (reply.status < 200 || reply.status >= 300) throw new Error(reply.status === 403 ? "这台手机没有访问权限，请在电脑端检查授权。" : reply.status === 409 ? "当前会话暂时无法发送，请稍后重试。" : "设备未能完成请求，请刷新后重试。");
+          const reply = decodeHttp(Buffer.concat(pending.chunks), pending.binary);
+          if (reply.status < 200 || reply.status >= 300) throw responseError(reply.status, reply.body, pending.binary);
           pending.resolve(reply.body);
         } catch (error) { pending.reject(error instanceof Error ? error : new Error("设备响应无法读取。")); }
       },
@@ -160,21 +186,26 @@ export class RelayConnection implements WorkspaceConnection {
       pending.outgoing = pending.outgoing.subarray(written);
     }
   }
-  async request<T>(path: string, options: { method?: "GET" | "POST"; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
-    const allowed = options.method === "POST" ? /^\/api\/bots\/[A-Za-z0-9_.:-]+\/(messages|read)$/ : /^\/api\/(bots\?messages=1|threads\/[A-Za-z0-9_.:-]+\/messages\?limit=50(?:&before=[A-Za-z0-9_.:%-]+)?)$/;
-    if (!allowed.test(path)) throw new Error("手机端不支持此操作。");
+  private failRequest(id: number, error: Error): void {
+    const pending = this.pending.get(id);
+    this.pending.delete(id); pending?.cleanup(); pending?.reject(error); this.mux?.reset(id);
+  }
+  async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+    if (!mobileRequestAllowed(options.method ?? "GET", path)) throw new Error("手机端不支持此操作。");
     if (!this.mux || this.socket.readyState !== WebSocket.OPEN) throw new Error("设备已离线，请重新连接。");
     options.signal?.throwIfAborted();
-    const body = options.body === undefined ? Buffer.alloc(0) : Buffer.from(JSON.stringify(options.body));
-    if (body.length > 128 * 1024) throw new Error("消息过长，请缩短后发送。");
+    const body = options.rawBody ? Buffer.from(options.rawBody) : options.body === undefined ? Buffer.alloc(0) : Buffer.from(JSON.stringify(options.body));
+    if (body.length > (options.rawBody ? 10 * 1024 * 1024 : 128 * 1024)) throw new Error("消息过长，请缩短后发送。");
     if (!/^omb_[A-Za-z0-9_-]+$/.test(this.descriptor.deviceToken)) throw new Error("设备授权凭据无效。");
-    const head = Buffer.from(`${options.method ?? "GET"} ${path} HTTP/1.1\r\nHost: donebot.e2e.invalid\r\nAuthorization: Bearer ${this.descriptor.deviceToken}\r\nContent-Type: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\nContent-Length: ${body.length}\r\n\r\n`);
+    const contentType = options.rawBody ? options.contentType ?? "application/octet-stream" : "application/json";
+    if (!/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(contentType)) throw new Error("附件格式无效。");
+    const head = Buffer.from(`${options.method ?? "GET"} ${path} HTTP/1.1\r\nHost: donebot.e2e.invalid\r\nAuthorization: Bearer ${this.descriptor.deviceToken}\r\nContent-Type: ${contentType}\r\nAccept-Encoding: identity\r\nConnection: close\r\nContent-Length: ${body.length}\r\n\r\n`);
     return new Promise<T>((resolve, reject) => {
       const id = this.mux!.open();
-      const abort = () => this.mux?.reset(id);
-      const timeout = setTimeout(abort, 30_000);
+      const abort = () => this.failRequest(id, new Error("操作已取消。"));
+      const timeout = setTimeout(() => this.failRequest(id, new Error("传输超时，请重试。")), options.responseType ? 180_000 : 30_000);
       const cleanup = () => { clearTimeout(timeout); options.signal?.removeEventListener("abort", abort); };
-      this.pending.set(id, { chunks: [], bytes: 0, outgoing: Buffer.concat([head, body]), resolve: value => resolve(value as T), reject, cleanup });
+      this.pending.set(id, { binary: options.responseType === "bytes", limit: (options.responseType ? MAX_FILE_BYTES : MAX_RESPONSE) + 32 * 1024, chunks: [], bytes: 0, outgoing: Buffer.concat([head, body]), resolve: value => resolve(value as T), reject, cleanup });
       options.signal?.addEventListener("abort", abort, { once: true });
       this.flush(id);
     });
@@ -186,4 +217,15 @@ export class RelayConnection implements WorkspaceConnection {
     this.socket.onclose = null; this.socket.onmessage = null; this.socket.onerror = null; this.socket.onopen = null;
     this.socket.close();
   }
+}
+
+export function mobileRequestAllowed(method: string, path: string): boolean {
+  if (method === "PATCH") return /^\/api\/routines\/[A-Za-z0-9_-]+$/.test(path);
+  if (method === "POST") return /^\/api\/(bots|groups)\/[A-Za-z0-9_-]+\/(messages|read)$/.test(path)
+    || /^\/api\/(webhooks|app-triggers)\/[A-Za-z0-9_-]+\/enabled$/.test(path)
+    || /^\/api\/threads\/[A-Za-z0-9_-]+\/messages\/[A-Za-z0-9_-]+\/file$/.test(path)
+    || /^\/api\/attachments\?uploadId=[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(path);
+  return method === "GET" && (/^\/api\/(bots\?messages=(?:1|20)|threads\/[A-Za-z0-9_-]+\/messages\?limit=50(?:&before=[A-Za-z0-9_-]+)?)$/.test(path)
+    || /^\/api\/(routines|webhooks|app-triggers|connectors\/connected)$/.test(path)
+    || /^\/api\/attachments\/[A-Za-z0-9-]+\.(png|jpg|gif|webp)$/.test(path));
 }

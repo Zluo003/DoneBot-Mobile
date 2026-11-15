@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import { once } from "node:events";
@@ -14,12 +15,25 @@ const credHash = credentialHash(token);
 const transportPsk = psk(credHash, keyId(key.publicKey));
 const at = minutes => new Date(Date.now() - minutes * 60_000).toISOString();
 const bots = [
-  { id: "duobao", name: "多宝", title: "你的工作搭档", emoji: "🐹", threadId: "thread-duobao", workspaceId: "macbook", busy: false, unread: true },
-  { id: "xiaolu", name: "小鹿", title: "内容与创作", emoji: "🦌", threadId: "thread-xiaolu", workspaceId: "macbook", busy: false, unread: false },
-  { id: "ahe", name: "阿和", title: "研究与整理", emoji: "🦉", threadId: "thread-ahe", workspaceId: "cloud", busy: false, unread: true },
+  { id: "duobao", defaultBot: {}, chiefOfStaff: true, name: "多宝", title: "你的工作搭档", color: "orange", mascotBody: "blob", threadId: "thread-duobao", workspaceId: "macbook", busy: false, unread: true },
+  { id: "xiaolu", section: "内容与创作", chiefOfStaff: true, name: "小鹿", title: "内容与创作", color: "blue", avatarCrop: "rounded", avatarUrl: "/api/attachments/fixture-avatar.png", avatarZoom: 1.2, avatarFocusX: 0.4, threadId: "thread-xiaolu", workspaceId: "macbook", busy: false, unread: false },
+  { id: "ahe", defaultBot: {}, chiefOfStaff: true, name: "阿和", title: "研究与整理", color: "purple", mascotBody: "star", threadId: "thread-ahe", workspaceId: "cloud", busy: false, unread: true },
 ];
+const groups = [{ id: "creative-room", name: "创意讨论室", threadId: "thread-room", memberIds: ["duobao", "xiaolu"], section: "内容与创作", workspaceId: "macbook", working: false, unread: true }];
+const routines = [
+  { id: "daily-brief", name: "每日工作简报", botId: "duobao", enabled: true, prompt: "整理今天的工作进展与需要关注的事项。", nextRunAt: Date.now() + 3600_000, workspaceId: "macbook" },
+  { id: "weekly-research", name: "每周资料归档", botId: "ahe", enabled: false, prompt: "归档本周收集的研究资料。", nextRunAt: null, workspaceId: "cloud" },
+];
+const webhooks = [{ id: "incoming-update", name: "项目更新通知", botId: "xiaolu", enabled: true, prompt: "收到项目更新后整理重点。", workspaceId: "macbook" }];
+const appTriggers = [{ id: "mail-followup", name: "新邮件跟进", botId: "duobao", enabled: false, prompt: "收到客户新邮件后准备回复草稿。", appName: "Gmail", eventName: "收到新邮件", workspaceId: "macbook" }];
 const histories = new Map([
+  ["thread-room", [
+    { id: "room-reply", role: "bot", kind: "text", text: "两版方案都整理好了，可以一起讨论。", from: { botId: "xiaolu", name: "小鹿", color: "blue" }, timestamp: at(7) },
+    { id: "room-user", role: "user", kind: "text", text: "这条用户消息不应成为列表的最后回复。", timestamp: at(5) },
+  ]],
   ["thread-duobao", [
+    { id: "tool-activity", role: "bot", kind: "activity", text: "Fixture hidden tool activity", timestamp: at(17) },
+    { id: "tool-digest", role: "bot", kind: "digest", text: "Fixture hidden execution digest", timestamp: at(17) },
     { id: "m1", role: "user", kind: "text", text: "帮我整理一下今天需要关注的事情。", timestamp: at(16) },
     { id: "m2", role: "bot", kind: "text", text: "整理好了，今天有三件事值得关注：\n\n1. **手机端开发**：先把登录、Bot 列表和聊天跑通。\n2. **产品资料**：新的介绍文档已经整理好，可以继续完善。\n3. **本周计划**：还有两项工作需要你确认优先级。\n\n你想先从哪一件开始？", timestamp: at(14) },
     { id: "m3", role: "user", kind: "text", text: "先看手机端，保持简单。", timestamp: at(10) },
@@ -29,6 +43,21 @@ const histories = new Map([
   ["thread-ahe", [{ id: "a1", role: "bot", kind: "text", text: "资料已经按主题归档，三份重点摘要也准备好了。", timestamp: at(58) }]],
 ]);
 const received = new Set();
+const files = new Map();
+for (const [name, mime] of [["photo.png", "image/png"], ["demo.mp4", "video/mp4"], ["note.wav", "audio/wav"], ["guide.pdf", "application/pdf"], ["notes.txt", "text/plain"]]) {
+  files.set(`/fixture/${name}`, { bytes: await readFile(new URL(`../tests/fixtures/media/${name}`, import.meta.url)), mime, name });
+}
+files.set("/api/attachments/fixture-avatar.png", files.get("/fixture/photo.png"));
+files.set("/fixture/jimeng-image-generate-20261114155450727-fixture.png", files.get("/fixture/photo.png"));
+histories.get("thread-xiaolu").push({ id: "files", role: "bot", kind: "text", text: "文件已准备好，可以在手机上查看、保存或转发。\n\n[文字说明](/fixture/notes.txt)", timestamp: at(1), attachments: [
+  { kind: "image", path: "/fixture/photo.png", mime: "image/png", name: "预览图.png" },
+  { kind: "file", path: "/fixture/demo.mp4", mime: "video/mp4", name: "演示视频.mp4" },
+  { kind: "audio", path: "/fixture/note.wav", mime: "audio/wav", name: "语音.wav" },
+  { kind: "file", path: "/fixture/guide.pdf", mime: "application/pdf", name: "使用指南.pdf" },
+] });
+histories.get("thread-xiaolu").push({ id: "generated-image", role: "bot", kind: "text", text: "", timestamp: at(0), attachments: [{ kind: "image", path: "/fixture/jimeng-image-generate-20261114155450727-fixture.png", mime: "image/png", name: "生成图片.png" }] });
+const raw = async req => { const chunks = []; let size = 0; for await (const chunk of req) { size += chunk.length; if (size > 10 * 1024 * 1024) throw new Error("oversized"); chunks.push(chunk); } return Buffer.concat(chunks); };
+const binary = (res, file) => { res.writeHead(200, { "content-type": file.mime, "content-length": file.bytes.length, "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(file.name)}` }); res.end(file.bytes); };
 const desktopFixture = process.env.MOBILE_DESKTOP_FIXTURE_URL ? new URL(process.env.MOBILE_DESKTOP_FIXTURE_URL) : null;
 if (desktopFixture && (desktopFixture.protocol !== "http:" || desktopFixture.hostname !== "127.0.0.1" || !desktopFixture.port || desktopFixture.pathname !== "/" || desktopFixture.search || desktopFixture.hash || desktopFixture.username || desktopFixture.password)) throw new Error("Only an explicitly launched loopback fixture is supported");
 const webPort = Number(process.env.MOBILE_FIXTURE_PORT || 5174);
@@ -41,23 +70,56 @@ const rpc = http.createServer(async (req, res) => {
     if (req.headers.authorization !== `Bearer ${token}`) return json(res, 401, {});
     const url = new URL(req.url, "http://fixture.invalid");
     const workspace = req.headers["x-fixture-workspace"];
-    if (req.method === "GET" && url.pathname === "/api/bots") return json(res, 200, { bots: bots.filter(bot => !workspace || bot.workspaceId === workspace).map(bot => ({ ...bot, messages: histories.get(bot.threadId).slice(-1) })) });
+    if (req.method === "GET" && ["/api/routines", "/api/webhooks", "/api/app-triggers"].includes(url.pathname)) {
+      const [key, items] = url.pathname === "/api/routines" ? ["routines", routines] : url.pathname === "/api/webhooks" ? ["webhooks", webhooks] : ["triggers", appTriggers];
+      return json(res, 200, { [key]: items.filter(item => item.workspaceId === workspace) });
+    }
+    if (req.method === "GET" && url.pathname === "/api/connectors/connected") return json(res, 200, { credentialStore: "ok", inventoryComplete: true, services: workspace === "cloud" ? { notion: { connected: true, accounts: [{ id: "notion-fixture", alias: "研究资料", status: "ACTIVE" }] } } : { gmail: { connected: true, accounts: [{ id: "gmail-fixture", alias: "preview@donebot.test", status: "ACTIVE" }] }, slack: { connected: false, accounts: [{ id: "slack-fixture", alias: "创作团队", status: "EXPIRED" }] } } });
+    const toggle = /^\/api\/(routines|webhooks|app-triggers)\/([\w-]+)(\/enabled)?$/.exec(url.pathname);
+    if (toggle && req.method === (toggle[1] === "routines" ? "PATCH" : "POST")) {
+      const item = (toggle[1] === "routines" ? routines : toggle[1] === "webhooks" ? webhooks : appTriggers).find(item => item.id === toggle[2] && item.workspaceId === workspace);
+      if (!item) return json(res, 404, {});
+      const body = await read(req);
+      if (Object.keys(body).length !== 1 || typeof body.enabled !== "boolean") return json(res, 400, {});
+      item.enabled = body.enabled;
+      return json(res, 200, { [toggle[1] === "routines" ? "routine" : toggle[1] === "webhooks" ? "webhook" : "trigger"]: item });
+    }
+    if (req.method === "GET" && url.pathname === "/api/bots") return json(res, 200, {
+      bots: bots.filter(bot => !workspace || bot.workspaceId === workspace).map(bot => ({ ...bot, messages: histories.get(bot.threadId).slice(-Number(url.searchParams.get("messages") || 1)) })),
+      sections: workspace === "cloud" ? [] : ["内容与创作"],
+      groups: groups.filter(group => !workspace || group.workspaceId === workspace).map(group => ({ ...group, messages: histories.get(group.threadId).slice(-Number(url.searchParams.get("messages") || 1)) })),
+    });
     const thread = /^\/api\/threads\/([^/]+)\/messages$/.exec(url.pathname);
     if (thread && req.method === "GET") return json(res, 200, { messages: histories.get(thread[1]) ?? [], hasMore: false });
-    const target = /^\/api\/bots\/([^/]+)\/(messages|read)$/.exec(url.pathname);
+    if (req.method === "GET" && url.pathname === "/api/attachments/fixture-avatar.png") return binary(res, files.get(url.pathname));
+    if (req.method === "POST" && url.pathname === "/api/attachments") {
+      const id = url.searchParams.get("uploadId");
+      const path = `/api/attachments/${id}.png`;
+      const bytes = await raw(req);
+      files.set(path, { bytes, mime: req.headers["content-type"], name: "上传图片.png" });
+      return json(res, 201, { path, mime: req.headers["content-type"], bytes: bytes.length });
+    }
+    const download = /^\/api\/threads\/([^/]+)\/messages\/([^/]+)\/file$/.exec(url.pathname);
+    if (download && req.method === "POST") {
+      const { path } = await read(req);
+      const message = histories.get(download[1])?.find(message => message.id === download[2]);
+      if (!message || !(message.attachments?.some(attachment => attachment.path === path) || message.text.includes(path)) || !files.has(path)) return json(res, 403, {});
+      return binary(res, files.get(path));
+    }
+    const target = /^\/api\/(bots|groups)\/([^/]+)\/(messages|read)$/.exec(url.pathname);
     if (target && req.method === "POST") {
       const body = await read(req);
-      const bot = bots.find(bot => bot.id === target[1]);
+      const bot = (target[1] === "groups" ? groups : bots).find(bot => bot.id === target[2]);
       if (!bot) return json(res, 404, {});
-      if (target[2] === "read") { bot.unread = false; return json(res, 200, { ok: true }); }
+      if (target[3] === "read") { bot.unread = false; return json(res, 200, { ok: true }); }
       if (!body.text || !body.sendId || body.threadId !== bot.threadId) return json(res, 400, {});
       if (received.has(body.sendId)) return json(res, 200, { threadId: bot.threadId });
       received.add(body.sendId);
       const message = { id: crypto.randomUUID(), role: "user", kind: "text", text: body.text, sendId: body.sendId, timestamp: new Date().toISOString() };
-      histories.get(bot.threadId).push(message); bot.busy = true;
+      histories.get(bot.threadId).push(message); bot.busy = true; bot.working = true;
       setTimeout(() => {
         histories.get(bot.threadId).push({ id: crypto.randomUUID(), role: "bot", kind: "text", text: `收到：${body.text}\n\n这条回复来自隔离验证服务。消息已通过与桌面端兼容的加密通道往返。`, timestamp: new Date().toISOString() });
-        bot.busy = false; bot.unread = true;
+        bot.busy = false; bot.working = false; bot.unread = true;
       }, 650).unref();
       return json(res, 200, { threadId: bot.threadId, message });
     }
@@ -115,10 +177,14 @@ wss.on("connection", socket => {
             proxy.write = function (chunk, ...args) {
               if (first) {
                 first = false;
-                const raw = chunk.toString();
-                chunk = Buffer.from(desktopFixture
+                const bytes = Buffer.from(chunk);
+                const boundary = bytes.indexOf("\r\n\r\n");
+                if (boundary < 0) throw new Error("Incomplete fixture request headers");
+                const raw = bytes.subarray(0, boundary + 4).toString();
+                const headers = desktopFixture
                   ? raw.replace(`Authorization: Bearer ${deviceToken}\r\n`, "").replace("Host: donebot.e2e.invalid", `Host: ${desktopFixture.host}`)
-                  : raw.replace(`Bearer ${deviceToken}`, `Bearer ${token}`).replace("\r\n\r\n", `\r\nX-Fixture-Workspace: ${workspaceId}\r\n\r\n`));
+                  : raw.replace(`Bearer ${deviceToken}`, `Bearer ${token}`).replace("\r\n\r\n", `\r\nX-Fixture-Workspace: ${workspaceId}\r\n\r\n`);
+                chunk = Buffer.concat([Buffer.from(headers), bytes.subarray(boundary + 4)]);
               }
               return originalWrite(chunk, ...args);
             };

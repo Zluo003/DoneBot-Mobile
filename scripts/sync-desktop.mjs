@@ -41,3 +41,16 @@ await writeFile(resolve(root, "src/desktop/credentials.ts"), upstream + `import 
 await mkdir(resolve(root, "tests/fixtures"), { recursive: true });
 const vectors = JSON.parse(await readFile(resolve(desktop, "companion/src/e2e/vectors/v1.json"), "utf8"));
 await writeFile(resolve(root, "tests/fixtures/e2e-v1.json"), JSON.stringify(Object.fromEntries(["about", "inputs", "V1", "V2", "V3", "V4", "V5"].map(key => [key, vectors[key]])), null, 2) + "\n");
+
+await import("./sync-avatars.mjs");
+
+const defaultBot = await readFile(resolve(desktop, "shared/default-bot.ts"), "utf8");
+const defaultFields = defaultBot.slice(defaultBot.indexOf("export interface DefaultBotMark"), defaultBot.indexOf("export interface HelperIntroField"));
+const defaultSelection = defaultBot.slice(defaultBot.indexOf("export const defaultBotPerson"), defaultBot.indexOf("/** A DoneBot hidden"));
+if (!defaultFields || !defaultSelection) throw new Error("Missing desktop default Bot contract");
+await writeFile(resolve(root, "src/desktop/default-bot.ts"), (upstream + defaultFields + defaultSelection).trimEnd() + "\n");
+
+const connectorStatus = await readFile(resolve(desktop, "src/lib/connector-status.ts"), "utf8");
+const connectorStart = connectorStatus.indexOf("export interface ConnectorStatus"), connectorEnd = connectorStatus.indexOf("export function needsReconnect");
+if (connectorStart < 0 || connectorEnd <= connectorStart) throw new Error("Missing desktop connector status contract");
+await writeFile(resolve(root, "src/desktop/connector-status.ts"), (upstream + connectorStatus.slice(connectorStart, connectorEnd)).trimEnd() + "\n");

@@ -95,20 +95,36 @@
 
 通知默认不包含消息正文。路由元数据会经过 Apple 推送服务；它不是端到端加密消息正文。App 只在账号匹配、目标 Bot 与线程可见时打开，随后从加密通道读取内容。App 前台刷新未读与会话；后台由 APNs 提醒，不依靠后台常驻 WebSocket 或静默推送保活。
 
-APNs 服务端须持有自己的 `.p8`、Key ID、Team ID 和 bundle topic `cn.donebot.mobile`，区分沙盒 / 生产环境，处理失效 token、去重与有限重试。这些密钥不进入手机工程。当前客户端不会显示“提醒已开启”，直到 token 已被中枢成功绑定。
+APNs 服务端须持有自己的 `.p8`、Key ID、Team ID 和 bundle topic `cn.donebot.mobile`，区分沙盒 / 生产环境，处理失效 token、去重与有限重试。管理员在网关「DoneBot → 手机连接」上传 .p8 并配置，无需新增 APNs 环境变量。这些密钥不进入手机工程。当前客户端不会显示“提醒已开启”，直到 token 已被中枢成功绑定。
 
 ## 原版会话接口
 
-手机目前仅开放以下加密请求：
+手机开放以下加密请求：
 
-- GET `/api/bots?messages=1`。
+- GET `/api/bots?messages=20`（兼容 `messages=1`），同步 `bots`、`sections`、`groups`。保留主协调 / 部门负责人、部门、群成员及最近 Bot 回复。
 - GET `/api/threads/:threadId/messages?limit=50[&before=:messageId]`。
 - POST `/api/bots/:botId/messages`，正文 `{ "text": "...", "threadId": "...", "sendId": "uuid" }`。
 - POST `/api/bots/:botId/read`，正文 `{ "threadId": "..." }`。
+- POST `/api/groups/:groupId/messages` 与 `/api/groups/:groupId/read`，复用原版群聊发送、已读与线程机制。
+- POST `/api/attachments?uploadId=:uuid`，原始图片字节，`Content-Type` 为图片 MIME。复用原版 10 MB 限额、图片验证、会话上传记录与 UUID 幂等机制。
+- POST `/api/threads/:threadId/messages/:messageId/file`，JSON `{ "path": "消息引用的原始路径" }`，返回原始二进制文件。复用原版消息归属、文件引用和工作目录校验，不开放任意路径读取。
+- GET `/api/attachments/:name.png|jpg|gif|webp`，用于已保存 Bot 头像，仍通过原版鉴权。
+- GET `/api/routines`、`/api/webhooks`、`/api/app-triggers`，读取当前会话可见 Bot 的定时工作、外部事件和应用事件自动化。
+- PATCH `/api/routines/:id`，仅接受 `{ "enabled": true|false }`。
+- POST `/api/webhooks/:id/enabled`、`/api/app-triggers/:id/enabled`，仅接受同一启用状态请求体；返回原工作记录，不返回 webhook 地址或凭据。
+- GET `/api/connectors/connected`，读取所选电脑 / Cloud 的公共连接状态与账号别名，不返回授权密钥。
+
+手机仅管理自动化开关，不提供创建、删除、试运行或内容编辑。额外字段和非布尔状态会被拒绝。网关和中继保持字节转发，不解释或执行自动化；开关变更由目标电脑 / Cloud 的原版管理器处理，需要更新相应运行服务。界面依据响应更新状态，离线禁止修改，失败保留原状态。
 
 读取原版 `unread: boolean` 和消息 `at` 毫秒时间戳。打开会话后固定线程，电脑端切换所选任务不改变手机发送目标。点击通知可进入该 Bot 可见任务中的指定线程，不修改电脑端的任务选择。
 
-发送失败保留草稿和 `sendId`，用户手动重试同一文本时沿用标识；客户端不自动重发发送请求。服务端必须继续使用原版去重和权限检查。手机只发送文本，复杂附件、权限卡片、工具操作由电脑端处理。
+发送失败保留草稿和 `sendId`，用户手动重试同一文本时沿用标识；客户端不自动重发发送请求。服务端必须继续使用原版去重和权限检查。手机通过原版 `<attached-image path="..." name="..." />` 格式发送拍摄或图库图片，可以不含文字。附件选择按固定会话保存；上传成功但发送确认丢失时，保留上传结果与发送 ID，重试不重新创建文件。权限卡片和工具操作仍由电脑端处理。
+
+消息保留原版 image / file / audio 附件，以及 Markdown 文件、图片引用。二进制响应支持 Content-Length / chunked、MIME 和 UTF-8 文件名。单文件读取上限 100 MB、传输超时 180 秒；更大的文件会明确提示。客户端在消息同步后自动下载其中引用的图片、视频、音频和文档，最多两个并发；渲染时优先读取账号隔离的本机持久缓存，离线也可预览完整下载过的附件。外部 HTTPS 文件由手机直接读取，不附带网关或设备凭据；浏览器预览受外部站点 CORS 限制。图片、视频在 iOS 中通过 PhotoKit 直接保存到图库，文档保留系统“文件”导出流程。
+
+iOS 平台适配器提供 camera / library、system open / save / share。临时文件位于应用 Cache，操作结束后清理，启动和退出时再次清理。UI 创建的对象 URL 在会话卸载、草稿移除或退出时释放；退出中止未完成的文件读取。Android / Harmony 可以实现相同 `MediaPlatform` 契约。
+
+Bot 列表从相应运行服务同步名称与 avatarUrl、avatarCrop、avatarZoom、avatarFocusX/Y、mascotBody、mascotFaceColor、color；头像不使用网关域名拼接绕过加密通道。
 
 ## 已实现的运行服务接口
 

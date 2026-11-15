@@ -1,3 +1,5 @@
+import { nativeMedia, webMedia } from "./media";
+import { nativeOfflineStorage, webOfflineStorage } from "./cache";
 import { Capacitor, registerPlugin } from "@capacitor/core";
 import { App } from "@capacitor/app";
 import { PushNotifications } from "@capacitor/push-notifications";
@@ -16,7 +18,7 @@ let extension: Platform | undefined;
 export function registerPlatform(platform: Platform): void { extension = platform; }
 
 const web: Platform = {
-  kind: "web",
+  kind: "web", media: webMedia, cache: webOfflineStorage,
   vault: {
     read: async key => memory.get(key) ?? null,
     write: async (key, value) => { memory.set(key, value); },
@@ -35,7 +37,7 @@ const web: Platform = {
 };
 
 const ios: Platform = {
-  kind: "ios",
+  kind: "ios", media: nativeMedia, cache: nativeOfflineStorage,
   vault: {
     read: async key => (await keychain.read({ key })).value,
     write: async (key, value) => keychain.write({ key, value }),
@@ -65,7 +67,10 @@ const ios: Platform = {
             void keychain.pushEnvironment().then(({ environment }) => finish({ token: token.value, platform: "ios", environment }), () => finish(new Error("无法读取推送环境。")));
           });
           cleanups.push(() => registered.remove());
-          const failed = await PushNotifications.addListener("registrationError", () => finish(new Error("暂时无法注册消息提醒，请检查网络后重试。")));
+          const failed = await PushNotifications.addListener("registrationError", event => {
+            const signing = /aps-environment|entitlement/i.test(event.error);
+            finish(new Error(signing ? "此安装包未获得 Apple 推送授权，请使用启用 Push Notifications 的签名重新安装。" : "暂时无法向 Apple 注册消息提醒，请检查网络后重试。"));
+          });
           cleanups.push(() => failed.remove());
           if (settled) { await Promise.all(cleanups.map(remove => remove())); return; }
           await PushNotifications.register();
