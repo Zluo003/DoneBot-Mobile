@@ -4,12 +4,13 @@ import { messageContent } from "../core/media";
 import { Avatar } from "./Avatar";
 import { viewersDefaultBot } from "../desktop/default-bot";
 import { MessageBody } from "./MessageFiles";
+import { useSwipeNavigation } from "./gestures";
 import { botKey, type Bot, type Message, type Workspace } from "../core/contracts";
 import { MenuSheet, PanelFrame, WorkspacePage, WorkspacePicker, readListDensity, saveListDensity, type ListDensity, type Panel } from "./WorkspacePanels";
 import type { MobileController, State } from "../core/controller";
 
-function IconButton({ label, children, onClick, disabled = false }: { label: string; children: ReactNode; onClick(): void; disabled?: boolean }) {
-  return <button type="button" className="icon-button" aria-label={label} title={label} onClick={onClick} disabled={disabled}>{children}</button>;
+function IconButton({ label, children, onClick, disabled = false, className = "" }: { label: string; children: ReactNode; onClick(): void; disabled?: boolean; className?: string }) {
+  return <button type="button" className={`icon-button ${className}`} aria-label={label} title={label} onClick={onClick} disabled={disabled}>{children}</button>;
 }
 function Spinner() { return <LoaderCircle size={18} className="spin" aria-hidden />; }
 function clock(value?: string | number): string {
@@ -128,6 +129,8 @@ function BotList({ controller, state, onMenu, source, onWorkspace, density }: { 
 
 function Chat({ state, controller }: { state: State; controller: MobileController }) {
   const bot = controller.selectedBot();
+  const panel = useRef<HTMLElement>(null);
+  useSwipeNavigation(panel, () => controller.back(), { enabled: Boolean(bot) });
   const scroll = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const content = useRef<HTMLDivElement>(null);
@@ -160,8 +163,8 @@ function Chat({ state, controller }: { state: State; controller: MobileControlle
     await controller.loadMessages(true);
     requestAnimationFrame(() => { if (element) element.scrollTop += element.scrollHeight - previous; });
   };
-  return <section className="chat-panel" aria-label={`${bot.name} 的会话`}>
-    <header className="chat-header"><IconButton label="返回 Bot 列表" onClick={() => controller.back()}><ArrowLeft size={22} /></IconButton><ConversationAvatar controller={controller} state={state} bot={bot} size={30} /><div className="chat-identity"><h1>{bot.name}</h1><p>{bot.workspace.kind === "cloud" ? <Cloud size={11} /> : <Monitor size={11} />}{bot.workspace.name}<span>·</span>{bot.busy ? "正在处理任务" : bot.workspace.online ? "在线" : "离线"}</p></div><span className="encrypted-indicator" title="端到端加密连接"><ShieldCheck size={17} /></span></header>
+  return <section ref={panel} className="chat-panel" aria-label={`${bot.name} 的会话`}>
+    <header className="chat-header"><IconButton className="back-button" label="返回 Bot 列表" onClick={() => controller.back()}><ArrowLeft size={22} /></IconButton><ConversationAvatar controller={controller} state={state} bot={bot} size={30} /><div className="chat-identity"><h1>{bot.name}</h1><p>{bot.workspace.kind === "cloud" ? <Cloud size={11} /> : <Monitor size={11} />}{bot.workspace.name}<span>·</span>{bot.busy ? "正在处理任务" : bot.workspace.online ? "在线" : "离线"}</p></div><span className="encrypted-indicator" title="端到端加密连接"><ShieldCheck size={17} /></span></header>
     <div className="messages-area"><div className="messages-scroll" ref={scroll} onScroll={() => { const element = scroll.current; if (element) { atBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 90; if (atBottom.current) setNewMessages(false); } }}>
       <div className="messages-content" ref={content}>{state.hasMore && <button className="history-button" onClick={() => void loadOlder()} disabled={state.loadingMessages}>{state.loadingMessages ? <Spinner /> : "查看更早消息"}</button>}
       {state.loadingMessages && !state.messages.length && <div className="loading-messages" role="status"><Spinner />正在同步消息…</div>}
@@ -191,9 +194,10 @@ export function App({ controller }: { controller: MobileController }) {
   const [density, setDensity] = useState<ListDensity>(readListDensity);
   const [returnPanel, setReturnPanel] = useState<Panel>("menu");
   const source = state.workspaces.find(workspace => workspace.id === sourceId) ?? state.workspaces[0];
+  const changeWorkspace = (id: string) => { setSourceId(id); void controller.refresh(id); };
   const navigate = (next: Panel) => { if (next === "apps" || next === "workspaces" || next === "automations") setReturnPanel(panel === "settings" ? "settings" : "menu"); setPanel(next); };
   useEffect(() => { if (state.phase !== "ready") { setPanel(null); setSourceId(""); } }, [state.phase]);
   if (state.phase === "boot") return <main className="boot-page"><Spinner /></main>;
   if (state.phase === "login") return <Login controller={controller} state={state} />;
-  return <main className={`app-shell ${state.selected ? "has-selection" : ""}`}><BotList controller={controller} state={state} onMenu={() => setPanel("menu")} source={source} onWorkspace={setSourceId} density={density} /><Chat controller={controller} state={state} />{panel === "menu" && <MenuSheet state={state} onNavigate={navigate} close={() => setPanel(null)} />}{panel === "settings" && <SettingsPage state={state} controller={controller} back={() => setPanel("menu")} onNavigate={navigate} density={density} onDensity={value => { setDensity(value); saveListDensity(value); }} />}{(panel === "apps" || panel === "workspaces" || panel === "automations") && <WorkspacePage page={panel} state={state} controller={controller} source={source} onWorkspace={setSourceId} back={() => setPanel(returnPanel)} />}</main>;
+  return <main className={`app-shell ${state.selected ? "has-selection" : ""}`}><BotList controller={controller} state={state} onMenu={() => setPanel("menu")} source={source} onWorkspace={changeWorkspace} density={density} /><Chat controller={controller} state={state} />{panel === "menu" && <MenuSheet state={state} onNavigate={navigate} close={() => setPanel(null)} />}{panel === "settings" && <SettingsPage state={state} controller={controller} back={() => setPanel("menu")} onNavigate={navigate} density={density} onDensity={value => { setDensity(value); saveListDensity(value); }} />}{(panel === "apps" || panel === "workspaces" || panel === "automations") && <WorkspacePage page={panel} state={state} controller={controller} source={source} onWorkspace={changeWorkspace} back={() => setPanel(returnPanel)} />}</main>;
 }

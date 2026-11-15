@@ -8,7 +8,7 @@ const config: CapacitorConfig = {
   ios: { contentInset: "never", preferredContentMode: "mobile", backgroundColor: "#fcfcfc" },
   plugins: {
     CapacitorHttp: { enabled: true },
-    PushNotifications: { presentationOptions: [] },
+    PushNotifications: { presentationOptions: ["banner", "sound", "badge"] },
     Keyboard: { resize: "native", resizeOnFullScreen: true },
   },
 };

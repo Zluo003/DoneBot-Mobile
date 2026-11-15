@@ -6,6 +6,8 @@ import type { Attachment, Bot, FileAction, Message } from "../core/contracts";
 import { errorMessage } from "../core/contracts";
 import type { MobileController } from "../core/controller";
 import { fileName, localReference, mediaKind, messageContent, remoteReference, remoteFileLink } from "../core/media";
+import { ImagePreview } from "./ImagePreview";
+import { useSwipeNavigation } from "./gestures";
 
 function MessageMedia({ controller, bot, message, attachment }: { controller: MobileController; bot: Bot; message: Message; attachment: Attachment }) {
   const [loaded, setLoaded] = useState<{ blob: Blob; url: string; name: string }>();
@@ -14,6 +16,7 @@ function MessageMedia({ controller, bot, message, attachment }: { controller: Mo
   const [expanded, setExpanded] = useState(false), [text, setText] = useState("");
   const abort = useRef(new AbortController()), link = useRef<string | undefined>(undefined), flight = useRef<Promise<{ blob: Blob; url: string; name: string }> | undefined>(undefined);
   const element = useRef<HTMLDivElement>(null), dialog = useRef<HTMLDialogElement>(null);
+  useSwipeNavigation(dialog, () => setExpanded(false), { enabled: expanded, down: true });
   const inlinePlayer = useRef<HTMLMediaElement | null>(null);
   const name = loaded?.name || attachment.name || fileName(attachment.path);
   const kind = mediaKind(loaded?.blob.type || attachment.mime || (attachment.kind === "image" ? "image/png" : attachment.kind === "audio" ? "audio/mpeg" : ""), loaded?.name || fileName(attachment.path));
@@ -69,9 +72,9 @@ function MessageMedia({ controller, bot, message, attachment }: { controller: Mo
               {document && <span>{name}</span>}
             </button>}
     {error && <div className="media-error" role="alert"><span>{error}</span><button className="icon-button" aria-label={`重试 ${name}`} onClick={() => void action("view")} disabled={busy}><RotateCw size={18} /></button></div>}
-    {expanded && loaded && <dialog ref={dialog} className="media-viewer" aria-label={`预览 ${name}`} onCancel={() => setExpanded(false)}>
+    {expanded && loaded && <dialog ref={dialog} className="media-viewer" aria-label={`预览 ${name}`} onCancel={() => setExpanded(false)} onClick={event => { if (event.target instanceof Element && !event.target.closest("button, a, img, video, audio, iframe, pre, .document-cover, .zoomable-image")) setExpanded(false); }}>
       <header><button className="viewer-close" aria-label="关闭预览" onClick={() => setExpanded(false)}><X size={23} /></button><span>{name}</span></header>
-      <div className="media-viewer-body">{kind === "image" ? <img src={loaded.url} alt={name} /> : kind === "video" ? <video src={loaded.url} controls autoPlay playsInline onError={playbackError} /> : kind === "audio" ? <audio src={loaded.url} controls autoPlay onError={playbackError} /> : kind === "pdf" ? <iframe src={loaded.url} title={name} /> : kind === "text" && text ? <pre>{text}</pre> : <div className="document-cover"><FileText size={64} /><p>{name}</p><button onClick={() => void action("open")}>打开文档</button></div>}</div>
+      <div className="media-viewer-body">{kind === "image" ? <ImagePreview src={loaded.url} alt={name} close={() => setExpanded(false)} /> : kind === "video" ? <video src={loaded.url} controls autoPlay playsInline onError={playbackError} /> : kind === "audio" ? <audio src={loaded.url} controls autoPlay onError={playbackError} /> : kind === "pdf" ? <iframe src={loaded.url} title={name} /> : kind === "text" && text ? <pre>{text}</pre> : <div className="document-cover"><FileText size={64} /><p>{name}</p><button onClick={() => void action("open")}>打开文档</button></div>}</div>
       {error && <p role="alert" className="viewer-error">{error}</p>}
       {status && <p role="status" className="viewer-status">{status}</p>}
       <nav className="viewer-actions" aria-label="附件操作">

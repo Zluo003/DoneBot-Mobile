@@ -98,7 +98,7 @@ export interface Platform {
     onOpen(listener: (route: NotificationRoute) => void): Promise<() => void>;
     onReceive(listener: () => void): Promise<() => void>;
   };
-  onResume(listener: () => void): Promise<() => void>;
+  onActiveChange(listener: (active: boolean) => void): Promise<() => void>;
 }
 export interface WorkspaceConnection {
   request<T>(path: string, options?: RequestOptions): Promise<T>;

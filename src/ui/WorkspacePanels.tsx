@@ -4,6 +4,7 @@ import { automationKey, type ConnectedApp } from "../core/automations";
 import type { MobileController, State } from "../core/controller";
 import type { Workspace } from "../core/contracts";
 import { hasActiveConnection } from "../desktop/connector-status";
+import { useSwipeNavigation } from "./gestures";
 
 export type Panel = "menu" | "settings" | "automations" | "apps" | "workspaces";
 export type ListDensity = "compact" | "standard" | "comfortable";
@@ -22,12 +23,14 @@ export function WorkspacePicker({ state, source, onChange }: { state: State; sou
 
 export function PanelFrame({ title, children, back, action }: { title: string; children: ReactNode; back(): void; action?: ReactNode }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  useSwipeNavigation(dialog, back);
   useEffect(() => { dialog.current?.showModal(); return () => dialog.current?.close(); }, []);
-  return <dialog ref={dialog} className="page-sheet" aria-label={title} onCancel={event => { event.preventDefault(); back(); }}><header className="page-header"><button className="icon-button" aria-label="返回" onClick={back}><ArrowLeft size={22} /></button><h2>{title}</h2>{action ?? <span className="header-spacer" />}</header><div className="page-body">{children}</div></dialog>;
+  return <dialog ref={dialog} className="page-sheet" aria-label={title} onCancel={event => { event.preventDefault(); back(); }}><header className="page-header"><button className="icon-button back-button" aria-label="返回" onClick={back}><ArrowLeft size={22} /></button><h2>{title}</h2>{action ?? <span className="header-spacer" />}</header><div className="page-body">{children}</div></dialog>;
 }
 
 export function MenuSheet({ state, onNavigate, close }: { state: State; onNavigate(panel: Panel): void; close(): void }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  useSwipeNavigation(dialog, close);
   useEffect(() => { dialog.current?.showModal(); return () => dialog.current?.close(); }, []);
   return <dialog ref={dialog} className="account-sheet" aria-label="菜单" onCancel={close} onClick={event => { if (event.target === event.currentTarget) close(); }}><div className="sheet-inner"><header><h2><Menu size={20} />菜单</h2><button className="icon-button" aria-label="关闭菜单" onClick={close}><X size={20} /></button></header><p className="menu-account">{state.session?.account.email}</p><nav className="menu-links" aria-label="功能菜单">
     <button onClick={close}><MessageSquare size={20} /><span>聊天</span><ChevronRight size={17} /></button>

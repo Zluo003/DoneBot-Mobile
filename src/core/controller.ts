@@ -33,6 +33,8 @@ export class MobileController {
   private transfers = new Set<AbortController>();
   private activeSends = new Set<string>();
   private refreshFlight: Promise<void> | undefined;
+  private botFlights = new Map<string, Promise<void>>();
+  private syncEpoch = 0;
   private historyFlight: Promise<void> | undefined;
   private pushFlight: Promise<void> | undefined;
   private route: NotificationRoute | null = null;
@@ -40,6 +42,8 @@ export class MobileController {
   private cleanup: Array<() => void> = [];
   private visible = true;
   private presenceAt = 0;
+  private presenceFlight: Promise<void> | undefined;
+  private pushRestoredAt = 0;
   private cache: AccountCache | null = null;
   private fileFlights = new Map<string, Promise<BinaryFile>>();
   private fileQueue = new Map<string, { bot: Bot; messageId: string | null; path: string }>();
@@ -91,7 +95,7 @@ export class MobileController {
     this.drainFiles();
   }
   private drainFiles(): void {
-    if (!this.cache || !this.state.session || this.state.offline) return;
+    if (!this.cache || !this.state.session || this.state.offline || !this.visible) return;
     const epoch = this.epoch, cache = this.cache;
     while (this.preloading.size < 2 && this.fileQueue.size) {
       const [key, file] = this.fileQueue.entries().next().value!;
@@ -114,6 +118,28 @@ export class MobileController {
   selectedBot(): Bot | undefined {
     const bot = this.state.bots.find(bot => botKey(bot) === this.state.selected);
     return bot ? { ...bot, threadId: this.state.selectedThread ?? bot.threadId } : undefined;
+  }
+
+  private resetConnections(): void {
+    ++this.syncEpoch; ++this.historyEpoch;
+    this.refreshFlight = undefined; this.historyFlight = undefined; this.presenceFlight = undefined;
+    this.botFlights.clear();
+    for (const id of this.connections.keys()) this.evict(id);
+  }
+  private syncActive(): void {
+    if (!this.state.session || !this.visible) return;
+    const epoch = this.epoch, syncEpoch = this.syncEpoch;
+    void this.refresh(this.selectedBot()?.workspace.id).then(() => {
+      if (this.visible && epoch === this.epoch && syncEpoch === this.syncEpoch) return this.pollMessages();
+    });
+    void this.restorePush();
+  }
+  private activeChanged(active: boolean): void {
+    if (active === this.visible) return;
+    this.visible = active;
+    this.resetConnections();
+    this.update({ loadingMessages: false });
+    if (active) { this.fileAttempts.clear(); this.presenceAt = 0; this.pushRestoredAt = 0; this.syncActive(); }
   }
 
   loadWorkspaceData(workspaceId: string, kind: "automations" | "apps"): Promise<void> {
@@ -184,29 +210,26 @@ export class MobileController {
       this.route = route;
       if (this.state.session) void this.refresh().then(() => this.openNotification());
     });
-    const received = this.platform.push.onReceive(() => { if (this.state.session) void this.refresh().then(() => this.pollMessages()); });
-    const resumed = this.platform.onResume(() => { this.fileAttempts.clear(); if (this.state.session) void this.refresh().then(() => this.pollMessages()); });
+    const received = this.platform.push.onReceive(() => this.syncActive());
+    const resumed = this.platform.onActiveChange(active => this.activeChanged(active));
     const installed = await Promise.allSettled([opened, received, resumed]);
     for (const result of installed) if (result.status === "fulfilled") this.cleanup.push(result.value);
-    const onVisibility = () => { this.visible = !document.hidden; if (this.visible && this.state.session) { this.fileAttempts.clear(); void this.refresh().then(() => this.pollMessages()); } };
-    document.addEventListener("visibilitychange", onVisibility);
-    this.cleanup.push(() => document.removeEventListener("visibilitychange", onVisibility));
     if (typeof window !== "undefined") {
       const offline = () => {
+        this.resetConnections();
         this.update({ offline: true, bots: this.state.bots.map(bot => ({ ...bot, busy: false, workspace: { ...bot.workspace, online: false } })), workspaces: this.state.workspaces.map(workspace => ({ ...workspace, online: false })) });
-        for (const id of this.connections.keys()) this.evict(id);
       };
-      const online = () => { this.fileAttempts.clear(); if (this.state.session) void this.refresh().then(() => this.pollMessages()); };
+      const online = () => { this.resetConnections(); this.fileAttempts.clear(); this.presenceAt = 0; this.pushRestoredAt = 0; this.syncActive(); };
       window.addEventListener("offline", offline); window.addEventListener("online", online);
       this.cleanup.push(() => { window.removeEventListener("offline", offline); window.removeEventListener("online", online); });
     }
-    const polling = setInterval(() => { if (this.visible && this.state.session) void this.refresh().then(() => this.pollMessages()); }, 4000);
+    const polling = setInterval(() => this.syncActive(), 4000);
     this.cleanup.push(() => clearInterval(polling));
     try {
       const session = await this.api.restore();
       if (session) await this.restoreCache(session);
       this.update({ phase: session ? "ready" : "login", session, push: this.platform.kind === "web" ? "unavailable" : "off" });
-      if (session) { await this.refresh(); this.openNotification(); void this.restorePush(); }
+      if (session) { void this.restorePush(); await this.refresh(); this.openNotification(); }
     } catch { this.update({ phase: "login", error: "无法读取登录状态，请重新登录。" }); }
   }
   async login(email: string, password: string): Promise<void> {
@@ -231,29 +254,28 @@ export class MobileController {
     const oldCache = this.cache; this.cache = null;
     ++this.epoch;
     this.clearMedia();
-    for (const id of this.connections.keys()) this.evict(id);
+    this.resetConnections();
     this.cachedMessages.clear(); this.sends.clear(); this.activeSends.clear();
-    this.refreshFlight = undefined; this.historyFlight = undefined;
     this.workspaceFlights.clear(); this.workspaceVersions.clear();
     this.state = { ...initial(), loading: this.state.loading, push: this.platform.kind === "web" ? "unavailable" : "off" };
-    this.presenceAt = 0;
+    this.presenceAt = 0; this.pushRestoredAt = 0;
     this.update({ phase: "boot" });
     await oldCache?.close();
     await this.restoreCache(session);
     this.update({ session, phase: "ready", challenge: null, error: "" });
-    await this.refresh(); this.openNotification(); void this.restorePush();
+    void this.restorePush(); await this.refresh(); this.openNotification();
   }
   private async connection(workspace: Workspace): Promise<WorkspaceConnection> {
-    const epoch = this.epoch;
+    const epoch = this.epoch, syncEpoch = this.syncEpoch;
     let existing = this.connections.get(workspace.id);
     if (!existing) {
       existing = (async () => {
         const descriptor = await this.api.connection(workspace.id);
-        if (epoch !== this.epoch || !this.state.session) throw new Error("账号已切换。");
+        if (epoch !== this.epoch || syncEpoch !== this.syncEpoch || !this.state.session) throw new Error("连接已更新。");
         await pinConnection(this.platform.vault, this.state.session.account.id, workspace.id, descriptor);
-        if (epoch !== this.epoch) throw new Error("账号已切换。");
+        if (epoch !== this.epoch || syncEpoch !== this.syncEpoch) throw new Error("连接已更新。");
         const connection = await this.connect(descriptor);
-        if (epoch !== this.epoch) { connection.close(); throw new Error("账号已切换。"); }
+        if (epoch !== this.epoch || syncEpoch !== this.syncEpoch || this.connections.get(workspace.id) !== existing) { connection.close(); throw new Error("连接已更新。"); }
         return connection;
       })();
       this.connections.set(workspace.id, existing);
@@ -265,57 +287,39 @@ export class MobileController {
     const existing = this.connections.get(id);
     this.connections.delete(id); void existing?.then(connection => connection.close(), () => {});
   }
-  refresh(): Promise<void> {
+  private presence(): void {
+    if (this.presenceFlight || Date.now() - this.presenceAt < 15_000) return;
+    const epoch = this.epoch, syncEpoch = this.syncEpoch;
+    const flight = this.api.presence(this.platform.kind).then(() => {
+      if (epoch === this.epoch && syncEpoch === this.syncEpoch) this.presenceAt = Date.now();
+    }).catch(() => {});
+    this.presenceFlight = flight;
+    void flight.finally(() => { if (this.presenceFlight === flight) this.presenceFlight = undefined; });
+  }
+  private async discover(): Promise<void> {
     if (this.refreshFlight) return this.refreshFlight;
-    if (!this.state.session) return Promise.resolve();
-    const epoch = this.epoch;
+    const epoch = this.epoch, syncEpoch = this.syncEpoch;
+    const current = () => epoch === this.epoch && syncEpoch === this.syncEpoch;
     const flight = (async () => {
       try {
         if (typeof navigator !== "undefined" && navigator.onLine === false) throw new Error("当前离线，可查看已缓存的消息和附件。");
-        if (Date.now() - this.presenceAt >= 15_000) {
-          await this.api.presence(this.platform.kind);
-          if (epoch !== this.epoch) return;
-          this.presenceAt = Date.now();
-        }
+        this.presence();
         const workspaces = await this.api.workspaces();
-        if (epoch !== this.epoch) return;
-        for (const [id] of this.connections) if (!workspaces.some(workspace => workspace.id === id && workspace.online)) this.evict(id);
-        const sections = { ...this.state.sections };
-        const results = await Promise.allSettled(workspaces.map(async workspace => {
-          if (!workspace.online) return this.state.bots.filter(bot => bot.workspace.id === workspace.id).map(bot => ({ ...bot, workspace }));
-          try {
-            const reply = directorySchema.parse(await (await this.connection(workspace)).request("/api/bots?messages=20"));
-            sections[workspace.id] = reply.sections;
-            return [...reply.bots, ...reply.groups.map(group => botSchema.parse({ ...group, conversationKind: "group", busy: group.working }))].map(bot => ({ ...bot, workspace }));
-          } catch (error) { if (epoch === this.epoch) this.evict(workspace.id); throw error; }
-        }));
-        if (epoch !== this.epoch) return;
-        const bots: Bot[] = []; const sourceErrors: Record<string, string> = {};
-        results.forEach((result, index) => {
-          const workspace = workspaces[index];
-          if (result.status === "fulfilled") bots.push(...result.value);
-          else {
-            sourceErrors[workspace.id] = errorMessage(result.reason);
-            bots.push(...this.state.bots.filter(bot => bot.workspace.id === workspace.id).map(bot => ({ ...bot, workspace: { ...workspace, online: false } })));
-          }
-        });
-        const merged = bots.map(bot => {
-          const unread = this.state.selected === botKey(bot) && this.state.selectedThread === bot.threadId && this.visible ? false : bot.unread;
-          return { ...bot, unread };
-        });
-        const lostSelection = this.state.selected && !merged.some(bot => botKey(bot) === this.state.selected);
-        if (lostSelection) { ++this.historyEpoch; this.historyFlight = undefined; }
-        for (const key of this.cachedMessages.keys()) if (!merged.some(bot => key.startsWith(`${botKey(bot)}/`))) this.cachedMessages.delete(key);
-        for (const bot of merged) if (bot.messages.length) {
-          const key = conversationKey(bot);
-          this.cachedMessages.set(key, mergeMessagePage(this.cachedMessages.get(key), { messages: bot.messages, hasMore: true }));
+        if (!current()) return;
+        for (const [id] of this.connections) if (!workspaces.some(workspace => workspace.id === id && workspace.online)) {
+          this.botFlights.delete(id); this.evict(id);
         }
-        this.update({ workspaces, sections: Object.fromEntries(workspaces.map(workspace => [workspace.id, sections[workspace.id] ?? []])), bots: merged, sourceErrors, error: "", offline: false, ...(lostSelection ? { selected: null, selectedThread: null, messages: [], hasMore: false, sending: false, loadingMessages: false, chatError: "" } : {}) });
+        const bots = this.state.bots.flatMap(bot => {
+          const workspace = workspaces.find(workspace => workspace.id === bot.workspace.id);
+          return workspace ? [{ ...bot, busy: workspace.online && bot.busy, workspace: { ...workspace, online: workspace.online && !this.state.sourceErrors[workspace.id] } }] : [];
+        });
+        this.updateDirectory(workspaces, bots, Object.fromEntries(workspaces.map(workspace => [workspace.id, this.state.sections[workspace.id] ?? []])),
+          Object.fromEntries(Object.entries(this.state.sourceErrors).filter(([id]) => workspaces.some(workspace => workspace.id === id))));
         await this.persistCache();
-        if (epoch === this.epoch) this.cacheAttachments();
       } catch (error) {
-        if (epoch === this.epoch) {
+        if (current()) {
           this.update({ offline: true, error: errorMessage(error), bots: this.state.bots.map(bot => ({ ...bot, busy: false, workspace: { ...bot.workspace, online: false } })), workspaces: this.state.workspaces.map(workspace => ({ ...workspace, online: false })) });
+          this.botFlights.clear();
           for (const id of this.connections.keys()) this.evict(id);
         }
       }
@@ -323,6 +327,55 @@ export class MobileController {
     this.refreshFlight = flight;
     void flight.finally(() => { if (this.refreshFlight === flight) this.refreshFlight = undefined; });
     return flight;
+  }
+  private updateDirectory(workspaces: Workspace[], bots: Bot[], sections: State["sections"], sourceErrors: State["sourceErrors"]): void {
+    const lostSelection = this.state.selected && !bots.some(bot => botKey(bot) === this.state.selected);
+    if (lostSelection) { ++this.historyEpoch; this.historyFlight = undefined; }
+    for (const key of this.cachedMessages.keys()) if (!bots.some(bot => key.startsWith(`${botKey(bot)}/`))) this.cachedMessages.delete(key);
+    for (const bot of bots) if (bot.messages.length) {
+      const key = conversationKey(bot);
+      this.cachedMessages.set(key, mergeMessagePage(this.cachedMessages.get(key), { messages: bot.messages, hasMore: true }));
+    }
+    this.update({ workspaces, sections, bots, sourceErrors, error: "", offline: false,
+      ...(lostSelection ? { selected: null, selectedThread: null, messages: [], hasMore: false, sending: false, loadingMessages: false, chatError: "" } : {}) });
+  }
+  private refreshBots(workspace: Workspace): Promise<void> {
+    const previous = this.botFlights.get(workspace.id);
+    if (previous) return previous;
+    const epoch = this.epoch, syncEpoch = this.syncEpoch;
+    let flight: Promise<void>;
+    const current = () => epoch === this.epoch && syncEpoch === this.syncEpoch && this.botFlights.get(workspace.id) === flight;
+    flight = (async () => {
+      try {
+        const reply = directorySchema.parse(await (await this.connection(workspace)).request("/api/bots?messages=20"));
+        if (!current()) return;
+        const latest = this.state.workspaces.find(item => item.id === workspace.id);
+        if (!latest?.online) return;
+        const bots = [...reply.bots, ...reply.groups.map(group => botSchema.parse({ ...group, conversationKind: "group", busy: group.working }))].map(bot => ({ ...bot, workspace: latest,
+          unread: this.state.selected === botKey({ ...bot, workspace: latest }) && this.state.selectedThread === bot.threadId && this.visible ? false : bot.unread }));
+        const sourceErrors = { ...this.state.sourceErrors }; delete sourceErrors[workspace.id];
+        this.updateDirectory(this.state.workspaces, [...this.state.bots.filter(bot => bot.workspace.id !== workspace.id), ...bots],
+          { ...this.state.sections, [workspace.id]: reply.sections }, sourceErrors);
+        await this.persistCache();
+        if (current()) { this.cacheAttachments(); this.openNotification(); }
+      } catch (error) {
+        if (current()) {
+          this.evict(workspace.id);
+          this.update({ sourceErrors: { ...this.state.sourceErrors, [workspace.id]: errorMessage(error) },
+            bots: this.state.bots.map(bot => bot.workspace.id === workspace.id ? { ...bot, busy: false, workspace: { ...bot.workspace, online: false } } : bot) });
+        }
+      }
+    })();
+    this.botFlights.set(workspace.id, flight);
+    void flight.finally(() => { if (this.botFlights.get(workspace.id) === flight) this.botFlights.delete(workspace.id); });
+    return flight;
+  }
+  async refresh(workspaceId?: string): Promise<void> {
+    if (!this.state.session) return;
+    const epoch = this.epoch, syncEpoch = this.syncEpoch;
+    await this.discover();
+    if (epoch !== this.epoch || syncEpoch !== this.syncEpoch || this.state.offline) return;
+    await Promise.all(this.state.workspaces.filter(workspace => workspace.online && (!workspaceId || workspace.id === workspaceId)).map(workspace => this.refreshBots(workspace)));
   }
   async select(bot: Bot, threadId = bot.threadId): Promise<void> {
     ++this.historyEpoch;
@@ -346,7 +399,7 @@ export class MobileController {
       this.update({ loadingMessages: false, chatError: this.state.messages.length ? "离线模式，正在显示已缓存的消息。" : "此会话尚未同步，连接设备后即可查看。" });
       return Promise.resolve();
     }
-    const epoch = this.epoch, historyEpoch = this.historyEpoch, key = conversationKey(bot);
+    const epoch = this.epoch, syncEpoch = this.syncEpoch, historyEpoch = this.historyEpoch, key = conversationKey(bot);
     if (!quiet) this.update({ loadingMessages: true, chatError: "" });
     const flight = (async () => {
       try {
@@ -362,7 +415,7 @@ export class MobileController {
         this.cacheAttachments();
         if (this.visible) void (await this.connection(bot.workspace)).request(`/api/${bot.conversationKind === "group" ? "groups" : "bots"}/${bot.id}/read`, { method: "POST", body: { threadId: bot.threadId } }).catch(() => {});
       } catch (error) {
-        if (epoch === this.epoch) this.evict(bot.workspace.id);
+        if (epoch === this.epoch && syncEpoch === this.syncEpoch) this.evict(bot.workspace.id);
         if (epoch === this.epoch && historyEpoch === this.historyEpoch) this.update({ chatError: errorMessage(error) });
       } finally { if (epoch === this.epoch && historyEpoch === this.historyEpoch) this.update({ loadingMessages: false }); }
     })();
@@ -380,7 +433,7 @@ export class MobileController {
     const previous = this.sends.get(key);
     let send = previous?.fingerprint === fingerprint ? previous : undefined;
     this.activeSends.add(key);
-    const epoch = this.epoch, historyEpoch = this.historyEpoch;
+    const epoch = this.epoch, syncEpoch = this.syncEpoch, historyEpoch = this.historyEpoch;
     this.update({ sending: true, chatError: "" });
     try {
       for (const image of images) {
@@ -404,7 +457,7 @@ export class MobileController {
       if (historyEpoch === this.historyEpoch) await this.loadMessages(false);
       await this.refresh();
     } catch (error) {
-      if (epoch === this.epoch) this.evict(bot.workspace.id);
+      if (epoch === this.epoch && syncEpoch === this.syncEpoch) this.evict(bot.workspace.id);
       if (epoch === this.epoch && historyEpoch === this.historyEpoch) this.update({ chatError: `${errorMessage(error)} 消息可能已送达，再次发送会沿用同一请求标识。` });
     } finally {
       if (epoch === this.epoch) {
@@ -516,10 +569,16 @@ export class MobileController {
   }
   private async restorePush(): Promise<void> {
     const accountId = this.state.session?.account.id;
-    if (!accountId) return;
+    if (!accountId || this.platform.kind === "web" || this.pushFlight || (this.state.push === "on" && this.pushRestoredAt !== 0) || Date.now() - this.pushRestoredAt < 60_000) return;
+    const epoch = this.epoch;
+    this.pushRestoredAt = Date.now();
     try {
       const preference = await this.platform.vault.read(`donebot.push.${accountId}`);
-      if (this.state.session?.account.id === accountId && preference === "on" && await this.platform.push.permission() === "granted") await this.enablePush();
+      if (epoch !== this.epoch || preference !== "on") return;
+      const permission = await this.platform.push.permission();
+      if (epoch !== this.epoch) return;
+      if (permission === "granted") await this.enablePush();
+      else this.update({ push: "off", pushError: "消息提醒未开启，可以在系统设置中允许通知。" });
     } catch { }
   }
   enablePush(): Promise<void> {
@@ -532,10 +591,11 @@ export class MobileController {
       try {
         const registration = await this.platform.push.register();
         if (epoch !== this.epoch || !this.state.session) return;
+        await this.platform.vault.write(`donebot.push.${accountId}`, "on");
+        if (epoch !== this.epoch) return;
         await this.api.subscribe(registration);
         if (epoch === this.epoch) {
-          await this.platform.vault.write(`donebot.push.${accountId}`, "on");
-          if (epoch === this.epoch) this.update({ push: "on" });
+          this.update({ push: "on" });
         }
       } catch (error) { if (epoch === this.epoch) this.update({ push: "off", pushError: errorMessage(error) }); }
     })();
@@ -564,11 +624,10 @@ export class MobileController {
   async logout(): Promise<void> {
     if (this.state.loading) return;
     const cache = this.cache; this.cache = null;
-    ++this.epoch; ++this.historyEpoch; this.clearMedia();
+    ++this.epoch; this.clearMedia();
     this.state = initial(); this.update({ loading: true });
-    this.refreshFlight = undefined; this.historyFlight = undefined;
+    this.resetConnections();
     this.workspaceFlights.clear(); this.workspaceVersions.clear();
-    for (const id of this.connections.keys()) this.evict(id);
     this.cachedMessages.clear(); this.sends.clear(); this.activeSends.clear(); this.route = null;
     const clearing = cache?.close(true).then(() => "", () => "登录已退出，但本机缓存未能完全清除，请检查手机存储后重试。") ?? Promise.resolve("");
     await this.pushFlight;
@@ -580,5 +639,5 @@ export class MobileController {
     try { await this.api.logout(); }
     finally { this.state = initial(); this.update({ phase: "login", error: cacheError, push: this.platform.kind === "web" ? "unavailable" : "off" }); }
   }
-  dispose(): void { ++this.epoch; this.clearMedia(); void this.cache?.close().catch(() => {}); this.cache = null; this.cleanup.forEach(dispose => dispose()); this.cleanup = []; for (const id of this.connections.keys()) this.evict(id); }
+  dispose(): void { ++this.epoch; this.resetConnections(); this.clearMedia(); void this.cache?.close().catch(() => {}); this.cache = null; this.cleanup.forEach(dispose => dispose()); this.cleanup = []; }
 }

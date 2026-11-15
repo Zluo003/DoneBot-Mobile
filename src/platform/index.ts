@@ -29,10 +29,11 @@ const web: Platform = {
     register: async () => { throw new Error("请在手机 App 中开启消息提醒。"); },
     unregister: async () => {}, onOpen: async () => () => {}, onReceive: async () => () => {},
   },
-  onResume: async listener => {
-    const resume = () => { if (!document.hidden) listener(); };
-    document.addEventListener("visibilitychange", resume);
-    return () => document.removeEventListener("visibilitychange", resume);
+  onActiveChange: async listener => {
+    const changed = () => listener(!document.hidden);
+    document.addEventListener("visibilitychange", changed);
+    changed();
+    return () => document.removeEventListener("visibilitychange", changed);
   },
 };
 
@@ -90,9 +91,15 @@ const ios: Platform = {
       return () => { void handle.remove(); };
     },
   },
-  onResume: async listener => {
-    const handle = await App.addListener("appStateChange", ({ isActive }) => { if (isActive) listener(); });
-    return () => { void handle.remove(); };
+  onActiveChange: async listener => {
+    let nativeActive = true;
+    let changedSinceRead = false;
+    const changed = () => listener(nativeActive && !document.hidden);
+    const handle = await App.addListener("appStateChange", ({ isActive }) => { changedSinceRead = true; nativeActive = isActive; changed(); });
+    document.addEventListener("visibilitychange", changed);
+    try { const state = await App.getState(); if (!changedSinceRead) { nativeActive = state.isActive; changed(); } }
+    catch { }
+    return () => { document.removeEventListener("visibilitychange", changed); void handle.remove(); };
   },
 };
 

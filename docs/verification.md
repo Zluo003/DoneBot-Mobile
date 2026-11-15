@@ -152,3 +152,27 @@ iOS 原生 PDF / Office 预览、保存位置、分享目标与摄像头仍需�
 四种模型接口的传图回归检查与目录检查共 44 项通过；临时 PostgreSQL 中枢 → 独立中继 → 原版隔离 Desktop / Cloud 运行服务的完整流程均通过。修复前原生模型请求的图片输入为 0，修复后为 1，且内容与手机上传原图逐字节一致。验证使用合成模型响应，未调用真实收费模型。完整证据与日志见 DoneBot `docs/verification/donebot-mobile.md` 的对应记录。
 
 此问题需升级桌面或 Cloud 运行服务后生效，手机 App 无需为这次修复重新打包。包含修复的本机 arm64 桌面测试包位于 DoneBot `release/mobile-input-20261115/`；未安装到用户电脑，也未部署线上 Cloud。
+
+## 在线状态自动刷新与推送恢复（2026-11-15）
+
+- `pnpm test`：8 个文件、65 项通过，覆盖恢复登录后自动发现、手机心跳阻塞时仍能读列表、不同工作空间独立刷新、旧响应不覆盖离线或重新连接后的状态、前后台切换及原生生命周期初始状态竞态。
+- 后台模拟检查：前台轮询停止、不新建消息请求、不注销 APNs；返回前台会重建连接并读取离开期间的新消息。旧历史请求失败不会关闭新连接。系统撤销通知授权后不会自动重新授权。
+- 订阅恢复检查：用户已授权且网关绑定失败时保留开启意愿；网络恢复立即重试，持续前台时至少相隔 60 秒重试；成功绑定后不持续重复注册。
+- `pnpm ios:build`：TypeScript、正式网页构建、Capacitor 同步及 iOS 模拟器编译通过。构建日志：`/tmp/donebot-mobile-refresh-ios-20261115.log`。
+- Playwright CLI 驱动 390×844 独立合成 fixture；暂停网页计时器后切换到离线 Cloud、电脑、恢复在线的 Cloud，三次操作分别立即请求工作空间列表并更新状态，未点击手动刷新。页面使用正式加密协议；状态响应为本轮浏览器拦截的合成数据。截图：`output/playwright/auto-refresh-cloud.png`。
+- 网关原有 `TestPostgresOwnershipGrantsAndPush` 在本轮临时 PostgreSQL 中重新通过，覆盖无需手机心跳的推送目标绑定与持久队列、投递重试、无效 token 和撤销。本轮未修改网关服务或生产数据，发送器为合成 APNs，不代表 Apple 接收或真机送达。
+
+本轮只需更新手机 App。没有安装到用户真机，没有执行网关、中继或 Cloud 线上升级。系统后台任务不提供固定刷新频率，提醒继续由网关发送 APNs alert；真实签名安装包仍需检查后台、锁屏、退出后送达及通知跳转。
+
+## 导航与媒体预览手势（2026-11-15）
+
+统一取消按钮、链接、输入框与选择器的焦点外框和触摸高亮；返回箭头保持 44px 点击区域，按下时不出现圆形背景。聊天、菜单、设置及其子页面支持左滑返回上一级。媒体预览支持下滑、左滑、点击空白或 Esc 退出；图片支持 1–4 倍双指缩放、缩放后的单指拖动及双击放大 / 还原。缩放中的拖动不触发关闭，缩回原尺寸后重新居中；表单、文本选择、横向滚动区域及媒体控制条保留原操作。
+
+- `pnpm test`：9 个文件、70 项通过，包括手势方向与误触、图片适配、焦点缩放位置和边界限制的 5 项新增检查。
+- `pnpm ios:build`：正式网页与 TypeScript 构建、Capacitor 同步和 iOS 模拟器编译通过。日志为 `output/gestures-ios-build.log`。
+- Playwright CLI 的 Chromium 390×844 独立合成 fixture 通过真实触摸输入检查左滑返回、双指缩放至约 2.57 倍、放大后拖动、缩回原尺寸、双击切换、取消多指、空白和下滑关闭。保存按钮触发 PNG 下载，视频控件操作保留预览，视频下滑和音频空白关闭正常，退出预览后仍留在原聊天。证据为 `output/playwright/gestures-navigation-check.log` 和 `gestures-preview-check.log`。
+- WebKit 的 iPhone 尺寸与触摸模式确认电脑 / Cloud 选择器、菜单关闭和设置返回均无焦点外框，实际触摸单击图片不关闭、双击放大到 2.5 倍、空白关闭正常；320×568 深色界面无横向溢出。证据为 `output/playwright/gestures-webkit-check.log`，截图包括 `gesture-webkit-picker.png`、`gesture-webkit-menu.png`、`gesture-webkit-settings.png`、`gesture-webkit-zoom.png`、`gesture-webkit-narrow-dark.png`。
+
+Chromium 检查没有控制台错误。Playwright WebKit 在加载合成音视频时报告其内置媒体控件图标资源错误，以上 WebKit 结果仅用于外框、图片触摸与布局检查，不作为真机音视频兼容性证明。
+
+以上均为独立合成数据与浏览器触摸检查，未安装到用户真机。此轮仅需更新手机 App，无需更新桌面或线上服务。

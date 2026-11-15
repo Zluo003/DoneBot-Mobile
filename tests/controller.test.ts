@@ -14,11 +14,12 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 const controllers: MobileController[] = [];
-afterEach(() => { controllers.forEach(controller => controller.dispose()); controllers.length = 0; vi.unstubAllGlobals(); });
+afterEach(() => { controllers.forEach(controller => controller.dispose()); controllers.length = 0; vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 function fixture() {
   const values = new Map<string, string>();
   let open: (route: NotificationRoute) => void = () => {};
+  let activeChange: (active: boolean) => void = () => {};
   const registration: PushRegistration = { token: "synthetic-apns", platform: "ios", environment: "sandbox" };
   const platform: Platform = {
     kind: "ios",
@@ -29,13 +30,14 @@ function fixture() {
       permission: vi.fn(async () => "granted" as const), register: vi.fn(async () => registration), unregister: vi.fn(async () => {}),
       onOpen: async listener => { open = listener; return () => {}; }, onReceive: async () => () => {},
     },
-    onResume: async () => () => {},
+    onActiveChange: async listener => { activeChange = listener; return () => {}; },
   };
   const workspace = { id: "computer", name: "Fixture", kind: "computer", provisioned: true, online: true };
+  const workspaces = [workspace];
   const bots = ["one", "two"].map(id => ({ id, name: id, threadId: `thread-${id}`, unread: false, tasks: [{ threadId: `thread-${id}` }, { threadId: `other-${id}` }] }));
   const fetcher = vi.fn(async (url: string, options?: RequestInit) => {
     if (url.endsWith("/auth/login")) return Response.json({ access_token: "synthetic-access", refresh_token: "synthetic-refresh", expires_in: 3600, user: { id: "account", email: "fixture@donebot.test" } });
-    if (url.endsWith("/mobile/workspaces")) return Response.json({ workspaces: [workspace] });
+    if (url.endsWith("/mobile/workspaces")) return Response.json({ workspaces });
     if (url.endsWith("/connection")) return Response.json({ v: 1, k: vectors.V1.transportPublicB64u, h: vectors.V1.hostIdB64u, r: ["relay1.donebot.cn"], deviceToken: "omb_synthetic_only" });
     if (url.endsWith("/mobile/session") || url.endsWith("/subscription") || url.endsWith("/auth/logout")) return Response.json({ ok: true });
     throw new Error(`Unexpected fixture URL: ${url} ${options?.method}`);
@@ -49,9 +51,10 @@ function fixture() {
   });
   const api = new MobileApi(platform.vault);
   const connection: WorkspaceConnection = { request: request as WorkspaceConnection["request"], close: vi.fn() };
-  const controller = new MobileController(api, platform, async () => connection);
+  const connect = vi.fn(async () => connection);
+  const controller = new MobileController(api, platform, connect);
   controllers.push(controller);
-  return { controller, api, platform, request, fetcher, values, bots, registration, open: (route: NotificationRoute) => open(route), login: () => controller.login("fixture@donebot.test", "synthetic-password") };
+  return { controller, api, platform, request, connection, connect, fetcher, values, bots, registration, workspace, workspaces, active: (value: boolean) => activeChange(value), open: (route: NotificationRoute) => open(route), login: () => controller.login("fixture@donebot.test", "synthetic-password") };
 }
 
 describe("conversation isolation", () => {
@@ -407,4 +410,135 @@ describe("workspace automations and connected apps", () => {
     expect(fx.controller.snapshot().automations).toEqual({});
     expect(fx.controller.snapshot().phase).toBe("login");
   });
+});
+
+describe("automatic status refresh and app lifecycle", () => {
+  it("refreshes a restored session even while phone presence is stalled", async () => {
+    const fx = fixture(); await fx.login();
+    const presence = deferred<Response>();
+    const original = fx.fetcher.getMockImplementation()!;
+    fx.fetcher.mockImplementation((url, options) => url.endsWith("/mobile/session") ? presence.promise : original(url, options));
+    const restarted = new MobileController(new MobileApi(fx.platform.vault), fx.platform, fx.connect); controllers.push(restarted);
+    const boot = restarted.boot();
+    await vi.waitFor(() => expect(restarted.snapshot().bots[0]?.workspace.online).toBe(true));
+    expect(restarted.snapshot().phase).toBe("ready");
+    presence.resolve(Response.json({ ok: true })); await boot;
+  });
+
+  it("updates gateway status before a slow Bot request completes and ignores its late reply", async () => {
+    const fx = fixture(); await fx.login();
+    const held = deferred<unknown>();
+    fx.request.mockReturnValueOnce(held.promise);
+    const slow = fx.controller.refresh();
+    await vi.waitFor(() => expect(fx.request).toHaveBeenCalledTimes(2));
+    fx.workspace.online = false;
+    await fx.controller.refresh("computer");
+    expect(fx.controller.snapshot().workspaces[0].online).toBe(false);
+    expect(fx.controller.snapshot().bots[0].workspace.online).toBe(false);
+    held.resolve({ bots: [{ ...fx.bots[0], name: "Late stale bot" }] }); await slow;
+    expect(fx.controller.snapshot().bots.map(bot => bot.name)).not.toContain("Late stale bot");
+  });
+
+  it("refreshes Cloud while another workspace request is stalled", async () => {
+    const fx = fixture(); await fx.login();
+    fx.workspaces.push({ ...fx.workspace, id: "cloud", kind: "cloud" });
+    const held = deferred<unknown>();
+    fx.request.mockReturnValueOnce(held.promise);
+    const slow = fx.controller.refresh("computer");
+    await vi.waitFor(() => expect(fx.request).toHaveBeenCalledTimes(2));
+    await fx.controller.refresh("cloud");
+    expect(fx.controller.snapshot().bots.filter(bot => bot.workspace.id === "cloud")).toHaveLength(2);
+    expect(fx.controller.snapshot().sourceErrors.cloud).toBeUndefined();
+    held.resolve({ bots: fx.bots }); await slow;
+  });
+
+  it("stops polling in the background, keeps push, and reconnects with current messages on return", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    const fx = fixture(); await fx.controller.boot(); await fx.login(); await fx.controller.enablePush();
+    await fx.controller.select(fx.controller.snapshot().bots[0]);
+    fx.fetcher.mockClear();
+    fx.active(false);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(fx.fetcher).not.toHaveBeenCalled();
+    expect(fx.platform.push.unregister).not.toHaveBeenCalled();
+    expect(fx.values.get("donebot.push.account")).toBe("on");
+    const previousConnects = fx.connect.mock.calls.length;
+    const original = fx.request.getMockImplementation()!;
+    fx.request.mockImplementation(async (path, options) => path.startsWith("/api/threads/") ? { messages: [{ id: "after-resume", role: "bot", text: "While you were away" }] } : original(path, options));
+    fx.active(true);
+    await vi.waitFor(() => expect(fx.controller.snapshot().messages[0]?.id).toBe("after-resume"));
+    expect(fx.connect.mock.calls.length).toBeGreaterThan(previousConnects);
+    expect(fx.fetcher.mock.calls.some(([url]) => url.endsWith("/mobile/workspaces"))).toBe(true);
+    await vi.waitFor(() => expect(fx.controller.snapshot().push).toBe("on"));
+    expect(fx.platform.push.register).toHaveBeenCalledTimes(2);
+  });
+
+  it("replaces a request suspended before backgrounding without accepting its late result", async () => {
+    const fx = fixture(); await fx.controller.boot(); await fx.login();
+    const held = deferred<unknown>(); fx.request.mockReturnValueOnce(held.promise);
+    const stale = fx.controller.refresh();
+    await vi.waitFor(() => expect(fx.request).toHaveBeenCalledTimes(2));
+    fx.active(false); fx.bots[0].name = "Fresh bot"; fx.active(true);
+    await vi.waitFor(() => expect(fx.controller.snapshot().bots[0]?.name).toBe("Fresh bot"));
+    held.resolve({ bots: [{ ...fx.bots[0], name: "Suspended stale bot" }] }); await stale;
+    expect(fx.controller.snapshot().bots[0]?.name).toBe("Fresh bot");
+  });
+
+  it("retries a consented failed subscription when networking returns without a new prompt", async () => {
+    const fx = fixture(); vi.stubGlobal("window", new EventTarget());
+    await fx.controller.boot(); await fx.login();
+    const subscribe = vi.spyOn(fx.api, "subscribe").mockRejectedValueOnce(new Error("Synthetic network failure"));
+    await fx.controller.enablePush();
+    expect(fx.controller.snapshot().push).toBe("off");
+    expect(fx.values.get("donebot.push.account")).toBe("on");
+    window.dispatchEvent(new Event("online"));
+    await vi.waitFor(() => expect(fx.controller.snapshot().push).toBe("on"));
+    expect(subscribe).toHaveBeenCalledTimes(2);
+  });
+
+  it("notices revoked system notification permission on return without re-enabling it", async () => {
+    const fx = fixture(); await fx.controller.boot(); await fx.login(); await fx.controller.enablePush();
+    vi.mocked(fx.platform.push.permission).mockResolvedValue("denied");
+    fx.active(false); fx.active(true);
+    await vi.waitFor(() => expect(fx.controller.snapshot().pushError).toContain("系统设置"));
+    expect(fx.controller.snapshot().push).toBe("off");
+    expect(fx.platform.push.register).toHaveBeenCalledTimes(1);
+  });
+});
+
+it("waits before retrying a failed push subscription while the app stays active", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+  const fx = fixture(); await fx.controller.boot(); await fx.login();
+  const subscribe = vi.spyOn(fx.api, "subscribe").mockRejectedValueOnce(new Error("Synthetic outage"));
+  await fx.controller.enablePush();
+  await vi.advanceTimersByTimeAsync(56_000);
+  expect(subscribe).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(4_000);
+  await vi.waitFor(() => expect(fx.controller.snapshot().push).toBe("on"));
+  expect(subscribe).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(120_000);
+  expect(subscribe).toHaveBeenCalledTimes(2);
+});
+
+it("does not start a message poll when a foreground refresh settles in the background", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+  const fx = fixture(); await fx.controller.boot(); await fx.login(); await fx.controller.select(fx.controller.snapshot().bots[0]);
+  const held = deferred<unknown>(); fx.request.mockReturnValueOnce(held.promise);
+  await vi.advanceTimersByTimeAsync(4_000);
+  const calls = fx.request.mock.calls.length;
+  fx.active(false); held.resolve({ bots: fx.bots });
+  await vi.advanceTimersByTimeAsync(8_000);
+  expect(fx.request).toHaveBeenCalledTimes(calls);
+});
+
+it("does not close a recovered connection when a pre-background history request fails late", async () => {
+  const fx = fixture(); await fx.controller.boot(); await fx.login();
+  const held = deferred<unknown>(); fx.request.mockReturnValueOnce(held.promise);
+  const selecting = fx.controller.select(fx.controller.snapshot().bots[0]);
+  await vi.waitFor(() => expect(fx.request).toHaveBeenCalledTimes(2));
+  fx.active(false); fx.active(true);
+  await vi.waitFor(() => expect(fx.connect).toHaveBeenCalledTimes(2));
+  held.reject(new Error("Suspended request closed")); await selecting;
+  await fx.controller.pollMessages();
+  expect(fx.connect).toHaveBeenCalledTimes(2);
 });
