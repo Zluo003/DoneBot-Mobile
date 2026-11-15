@@ -59,6 +59,10 @@ const defaultBotSchema = z.union([
   z.object({ person: z.string().optional() }),
   z.boolean().transform(value => value ? {} : undefined),
 ]);
+const taskSchema = z.object({
+  threadId: idSchema, unread: z.boolean().optional(), lastReadMessageId: idSchema.optional(),
+  updatedAt: z.number().optional(),
+});
 export const botSchema = z.object({
   id: idSchema, name: z.string(), threadId: idSchema,
   conversationKind: z.enum(["bot", "group"]).optional(), memberIds: z.array(idSchema).optional(),
@@ -69,12 +73,13 @@ export const botSchema = z.object({
   mascotBody: z.string().nullable().optional(), mascotFaceColor: z.enum(["white", "black"]).nullable().optional(), mascotExpression: z.number().nullable().optional(),
   busy: z.boolean().default(false), messages: z.array(messageSchema).default([]),
   unread: z.boolean().default(false),
-  tasks: z.array(z.object({ threadId: idSchema })).default([]),
+  unreadCount: z.number().int().nonnegative().optional(), lastReadMessageId: idSchema.optional(),
+  hasMore: z.boolean().optional(), tasks: z.array(taskSchema).default([]),
 }).passthrough();
 export type Bot = z.infer<typeof botSchema> & { workspace: Workspace };
 export const directorySchema = z.object({
   bots: z.array(botSchema), sections: z.array(z.string()).default([]),
-  groups: z.array(z.object({ id: idSchema, name: z.string(), threadId: idSchema, memberIds: z.array(idSchema), section: z.string().optional(), working: z.boolean().default(false), unread: z.boolean().default(false), messages: z.array(messageSchema).default([]), tasks: z.array(z.object({ threadId: idSchema })).default([]) })).default([]),
+  groups: z.array(z.object({ id: idSchema, name: z.string(), threadId: idSchema, memberIds: z.array(idSchema), section: z.string().optional(), working: z.boolean().default(false), unread: z.boolean().default(false), lastReadMessageId: idSchema.optional(), hasMore: z.boolean().optional(), messages: z.array(messageSchema).default([]), tasks: z.array(taskSchema).default([]) })).default([]),
 });
 export const messagePageSchema = z.object({ messages: z.array(messageSchema), hasMore: z.boolean().default(false) });
 export type MessagePage = z.infer<typeof messagePageSchema>;

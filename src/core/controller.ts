@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { attentionVersion, readThread, UnreadMessages, unreadThreads } from "./attention";
 import { automationKey, automationPath, automationSchema, connectedAppsSchema, readAutomations, type Automation, type ConnectedApp } from "./automations";
 import { fileName, messageFiles, remoteReference } from "./media";
 import { AccountCache, cachedFileKey, mergeMessagePage, offlineSnapshot } from "./offline";
@@ -34,6 +35,9 @@ export class MobileController {
   private activeSends = new Set<string>();
   private refreshFlight: Promise<void> | undefined;
   private botFlights = new Map<string, Promise<void>>();
+  private unreadMessages = new UnreadMessages();
+  private attentionFlights = new Map<string, { version: string }>();
+  private attentionCountedAt = new Map<string, number>();
   private syncEpoch = 0;
   private historyFlight: Promise<void> | undefined;
   private pushFlight: Promise<void> | undefined;
@@ -124,6 +128,7 @@ export class MobileController {
     ++this.syncEpoch; ++this.historyEpoch;
     this.refreshFlight = undefined; this.historyFlight = undefined; this.presenceFlight = undefined;
     this.botFlights.clear();
+    this.attentionFlights.clear();
     for (const id of this.connections.keys()) this.evict(id);
   }
   private syncActive(): void {
@@ -255,7 +260,7 @@ export class MobileController {
     ++this.epoch;
     this.clearMedia();
     this.resetConnections();
-    this.cachedMessages.clear(); this.sends.clear(); this.activeSends.clear();
+    this.cachedMessages.clear(); this.unreadMessages.clear(); this.attentionCountedAt.clear(); this.sends.clear(); this.activeSends.clear();
     this.workspaceFlights.clear(); this.workspaceVersions.clear();
     this.state = { ...initial(), loading: this.state.loading, push: this.platform.kind === "web" ? "unavailable" : "off" };
     this.presenceAt = 0; this.pushRestoredAt = 0;
@@ -334,7 +339,7 @@ export class MobileController {
     for (const key of this.cachedMessages.keys()) if (!bots.some(bot => key.startsWith(`${botKey(bot)}/`))) this.cachedMessages.delete(key);
     for (const bot of bots) if (bot.messages.length) {
       const key = conversationKey(bot);
-      this.cachedMessages.set(key, mergeMessagePage(this.cachedMessages.get(key), { messages: bot.messages, hasMore: true }));
+      this.cachedMessages.set(key, mergeMessagePage(this.cachedMessages.get(key), { messages: bot.messages, hasMore: bot.hasMore ?? true }));
     }
     this.update({ workspaces, sections, bots, sourceErrors, error: "", offline: false,
       ...(lostSelection ? { selected: null, selectedThread: null, messages: [], hasMore: false, sending: false, loadingMessages: false, chatError: "" } : {}) });
@@ -351,13 +356,19 @@ export class MobileController {
         if (!current()) return;
         const latest = this.state.workspaces.find(item => item.id === workspace.id);
         if (!latest?.online) return;
-        const bots = [...reply.bots, ...reply.groups.map(group => botSchema.parse({ ...group, conversationKind: "group", busy: group.working }))].map(bot => ({ ...bot, workspace: latest,
-          unread: this.state.selected === botKey({ ...bot, workspace: latest }) && this.state.selectedThread === bot.threadId && this.visible ? false : bot.unread }));
+        const bots = [...reply.bots, ...reply.groups.map(group => botSchema.parse({ ...group, conversationKind: "group", busy: group.working }))].map(item => {
+          let bot: Bot = { ...item, workspace: latest };
+          if (this.state.selected === botKey(bot) && this.visible && this.state.selectedThread) bot = readThread(bot, this.state.selectedThread);
+          const previous = this.state.bots.find(previous => botKey(previous) === botKey(bot));
+          const expired = unreadThreads(bot).some(task => task.threadId !== bot.threadId && task.updatedAt === undefined)
+            && Date.now() - (this.attentionCountedAt.get(botKey(bot)) ?? 0) >= 30_000;
+          return { ...bot, unreadCount: !bot.unread ? 0 : !expired && previous && attentionVersion(previous) === attentionVersion(bot) ? previous.unreadCount : undefined };
+        });
         const sourceErrors = { ...this.state.sourceErrors }; delete sourceErrors[workspace.id];
         this.updateDirectory(this.state.workspaces, [...this.state.bots.filter(bot => bot.workspace.id !== workspace.id), ...bots],
           { ...this.state.sections, [workspace.id]: reply.sections }, sourceErrors);
         await this.persistCache();
-        if (current()) { this.cacheAttachments(); this.openNotification(); }
+        if (current()) { this.cacheAttachments(); this.openNotification(); void this.syncUnreadCounts(bots); }
       } catch (error) {
         if (current()) {
           this.evict(workspace.id);
@@ -369,6 +380,40 @@ export class MobileController {
     this.botFlights.set(workspace.id, flight);
     void flight.finally(() => { if (this.botFlights.get(workspace.id) === flight) this.botFlights.delete(workspace.id); });
     return flight;
+  }
+  private async syncUnreadCounts(bots: Bot[]): Promise<void> {
+    const epoch = this.epoch, syncEpoch = this.syncEpoch;
+    const pending = bots.filter(bot => bot.unread && bot.unreadCount === undefined);
+    const worker = async () => {
+      for (let bot = pending.shift(); bot; bot = pending.shift()) {
+        const item = bot, key = botKey(item), version = attentionVersion(item);
+        if (this.attentionFlights.get(key)?.version === version) continue;
+        const token = { version };
+        this.attentionFlights.set(key, token);
+        const current = () => epoch === this.epoch && syncEpoch === this.syncEpoch && this.visible
+          && !this.state.offline && this.attentionFlights.get(key) === token
+          && this.state.bots.some(bot => botKey(bot) === key && bot.workspace.online && attentionVersion(bot) === version);
+        try {
+          if (!current()) continue;
+          const connection = await this.connection(item.workspace);
+          const count = await this.unreadMessages.count(item, async (threadId, before) => {
+            const page = messagePageSchema.parse(await connection.request(`/api/threads/${threadId}/messages?limit=50${before ? `&before=${encodeURIComponent(before)}` : ""}`));
+            if (current()) {
+              const conversation = conversationKey({ ...item, threadId });
+              this.cachedMessages.set(conversation, mergeMessagePage(this.cachedMessages.get(conversation), page, Boolean(before)));
+            }
+            return page;
+          }, current);
+          if (current()) {
+            this.attentionCountedAt.set(key, Date.now());
+            this.update({ bots: this.state.bots.map(bot => botKey(bot) === key ? { ...bot, unreadCount: count } : bot) });
+            await this.persistCache(); this.cacheAttachments();
+          }
+        } catch { }
+        finally { if (this.attentionFlights.get(key) === token) this.attentionFlights.delete(key); }
+      }
+    };
+    await Promise.all([worker(), worker()]);
   }
   async refresh(workspaceId?: string): Promise<void> {
     if (!this.state.session) return;
@@ -382,7 +427,7 @@ export class MobileController {
     this.historyFlight = undefined;
     const key = botKey(bot), conversation = conversationKey({ ...bot, threadId });
     const cached = this.cachedMessages.get(conversation);
-    this.update({ selected: key, selectedThread: threadId, messages: cached?.messages ?? [], hasMore: cached?.hasMore ?? false, sending: this.activeSends.has(conversation), chatError: "", bots: this.state.bots.map(item => botKey(item) === key ? { ...item, unread: false } : item) });
+    this.update({ selected: key, selectedThread: threadId, messages: cached?.messages ?? [], hasMore: cached?.hasMore ?? false, sending: this.activeSends.has(conversation), chatError: "", bots: this.state.bots.map(item => botKey(item) === key ? readThread(item, threadId) : item) });
     await this.loadMessages(false);
   }
   back(): void { ++this.historyEpoch; this.historyFlight = undefined; this.update({ selected: null, selectedThread: null, messages: [], chatError: "", sending: false, loadingMessages: false }); }
@@ -628,7 +673,7 @@ export class MobileController {
     this.state = initial(); this.update({ loading: true });
     this.resetConnections();
     this.workspaceFlights.clear(); this.workspaceVersions.clear();
-    this.cachedMessages.clear(); this.sends.clear(); this.activeSends.clear(); this.route = null;
+    this.cachedMessages.clear(); this.unreadMessages.clear(); this.attentionCountedAt.clear(); this.sends.clear(); this.activeSends.clear(); this.route = null;
     const clearing = cache?.close(true).then(() => "", () => "登录已退出，但本机缓存未能完全清除，请检查手机存储后重试。") ?? Promise.resolve("");
     await this.pushFlight;
     if (this.platform.kind !== "web") {

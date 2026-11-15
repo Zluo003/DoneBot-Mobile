@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
 import { ArrowLeft, ArrowUp, Bell, CalendarClock, Camera, ImagePlus, Link, List, Menu, Paperclip, ChevronRight, Crown, Users, Cloud, Eye, EyeOff, LoaderCircle, LogOut, MessageSquare, Monitor, RefreshCw, Search, ShieldCheck, WifiOff, X } from "lucide-react";
 import { messageContent } from "../core/media";
 import { Avatar } from "./Avatar";
@@ -84,6 +84,17 @@ function ConversationAvatar({ bot, state, controller, size = 46 }: { bot: Bot; s
 const lastReply = (bot: Bot) => [...bot.messages].reverse().find(message => message.role === "bot" && message.kind === "text");
 function BotList({ controller, state, onMenu, source, onWorkspace, density }: { controller: MobileController; state: State; onMenu(): void; source?: Workspace; onWorkspace(id: string): void; density: ListDensity }) {
   const [search, setSearch] = useState("");
+  const listId = useId();
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
+    try { const saved: unknown = JSON.parse(localStorage.getItem("donebot.collapsedDepartments") ?? "[]"); return new Set(Array.isArray(saved) ? saved.filter((key): key is string => typeof key === "string") : []); }
+    catch { return new Set(); }
+  });
+  const toggleDepartment = (key: string) => {
+    const next = new Set(collapsed);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    setCollapsed(next);
+    try { localStorage.setItem("donebot.collapsedDepartments", JSON.stringify([...next])); } catch { }
+  };
   const [refreshing, setRefreshing] = useState(false);
   const refresh = async () => { setRefreshing(true); await controller.refresh(); setRefreshing(false); };
   const bots = state.bots.filter(bot => bot.workspace.id === source?.id);
@@ -103,18 +114,25 @@ function BotList({ controller, state, onMenu, source, onWorkspace, density }: { 
       {state.error && <div className="source-error" role="alert"><WifiOff size={18} /><div>{state.error}<button onClick={() => void refresh()}>重新连接</button></div></div>}
       {source && state.sourceErrors[source.id] && <p className="workspace-error">{state.sourceErrors[source.id]}</p>}
       {chief && (!search || filtered.includes(chief)) && <button className="coordinator" onClick={() => void controller.select(chief)} aria-label={`打开 ${chief.name} 的会话`} aria-current={state.selected === botKey(chief) ? "page" : undefined}>
-        <span className="coordinator-avatar"><Avatar controller={controller} bot={chief} size={60} /><Crown size={16} className="coordinator-crown" />{chief.unread && <i className="coordinator-unread" aria-label="有未读消息" />}</span><strong>{chief.name}</strong><span>主协调 Bot</span><p>{lastReply(chief) ? preview(lastReply(chief)) : chief.busy ? "正在处理任务…" : "暂无回复"}</p>
+        <span className="coordinator-avatar"><Avatar controller={controller} bot={chief} size={60} /><Crown size={16} className="coordinator-crown" />{chief.unread && <i className="coordinator-unread" role="img" aria-label="有未读消息" />}{chief.busy && <i className="busy-dot" role="img" aria-label="正在工作" />}</span><strong>{chief.name}</strong><span>主协调 Bot</span><p>{chief.busy ? "正在处理任务…" : lastReply(chief) ? preview(lastReply(chief)) : "暂无回复"}</p>
       </button>}
-      {sections.map(section => {
-        const entries = filtered.filter(bot => bot !== chief && (bot.section ?? "") === section);
+      {sections.map((section, index) => {
+        const entries = filtered.filter(bot => bot !== chief && (bot.section ?? "") === section)
+          .sort((a, b) => Number(Boolean(b.chiefOfStaff && b.conversationKind !== "group")) - Number(Boolean(a.chiefOfStaff && a.conversationKind !== "group")));
         if (!entries.length) return null;
-        return <section className="directory-section" key={section} aria-label={section || "Bot 与群聊"}>{section && <h2 className="department-heading"><span>{section}</span><i /></h2>}{entries.map(bot => {
+        const key = JSON.stringify([state.session?.account.id, source?.id, section]);
+        const folded = Boolean(section && !search.trim() && collapsed.has(key));
+        const unread = entries.filter(bot => bot.unread);
+        const counting = unread.some(bot => bot.unreadCount === undefined);
+        const unreadCount = unread.reduce((count, bot) => count + (bot.unreadCount ?? 0), 0);
+        const membersId = `${listId}-department-${index}`;
+        return <section className="directory-section" key={section} aria-label={section || "Bot 与群聊"}>{section && <h2 className="department-heading"><button type="button" className="department-toggle" aria-expanded={!folded} aria-controls={membersId} onClick={() => toggleDepartment(key)}><ChevronRight size={15} className={folded ? "" : "expanded"} aria-hidden /><span>{section}</span><i aria-hidden />{folded && unread.length > 0 && <span className="department-unread" aria-label={counting ? "正在同步未读消息数量" : `${unreadCount} 条未读消息`}>{counting ? "…" : unreadCount}</span>}</button></h2>}<div id={membersId} hidden={folded}>{entries.map(bot => {
           const reply = lastReply(bot);
           return <button className={`bot-row ${state.selected === botKey(bot) ? "selected" : ""}`} key={botKey(bot)} onClick={() => void controller.select(bot)} aria-label={`打开 ${bot.name} 的会话`} aria-current={state.selected === botKey(bot) ? "page" : undefined}>
-            <span className="avatar-wrap"><ConversationAvatar bot={bot} state={state} controller={controller} size={density === "compact" ? 38 : density === "comfortable" ? 52 : 46} />{bot.chiefOfStaff && <Crown className="row-crown" size={13} />}{bot.busy && <span className="busy-dot" />}</span>
-            <span className="bot-row-content"><span className="bot-row-heading"><strong>{bot.name}</strong><time>{clock(reply?.timestamp)}</time></span><span className="bot-preview"><span>{reply ? preview(reply) : bot.busy ? "正在处理任务…" : "暂无回复"}</span>{bot.unread && <span className="unread-badge" aria-label="有未读消息" />}</span></span>
+            <span className="avatar-wrap"><ConversationAvatar bot={bot} state={state} controller={controller} size={density === "compact" ? 38 : density === "comfortable" ? 52 : 46} />{bot.chiefOfStaff && <Crown className="row-crown" size={13} />}{bot.busy && <span className="busy-dot" role="img" aria-label="正在工作" />}</span>
+            <span className="bot-row-content"><span className="bot-row-heading"><strong>{bot.name}</strong><time>{clock(reply?.timestamp)}</time></span><span className="bot-preview"><span>{bot.busy ? "正在处理任务…" : reply ? preview(reply) : "暂无回复"}</span>{bot.unread && <span className="unread-badge" role="img" aria-label="有未读消息" />}</span></span>
           </button>;
-        })}</section>;
+        })}</div></section>;
       })}
       {source && !bots.length && !state.sourceErrors[source.id] && <p className="section-empty">{online ? "还没有 Bot 或群聊" : "重新连接后同步 Bot 与群聊"}</p>}
       {!state.error && state.workspaces.length === 0 && <div className="empty-state"><MessageSquare size={30} strokeWidth={1.4} /><h2>还没有连接的 Bot</h2><p>在电脑端登录同一个 DoneBot 账号，<br />开启手机访问后即可在这里看到 Bot。</p><button className="outline-button" onClick={() => void refresh()} disabled={refreshing}>{refreshing ? <Spinner /> : <RefreshCw size={15} />}刷新</button></div>}
@@ -199,5 +217,5 @@ export function App({ controller }: { controller: MobileController }) {
   useEffect(() => { if (state.phase !== "ready") { setPanel(null); setSourceId(""); } }, [state.phase]);
   if (state.phase === "boot") return <main className="boot-page"><Spinner /></main>;
   if (state.phase === "login") return <Login controller={controller} state={state} />;
-  return <main className={`app-shell ${state.selected ? "has-selection" : ""}`}><BotList controller={controller} state={state} onMenu={() => setPanel("menu")} source={source} onWorkspace={changeWorkspace} density={density} /><Chat controller={controller} state={state} />{panel === "menu" && <MenuSheet state={state} onNavigate={navigate} close={() => setPanel(null)} />}{panel === "settings" && <SettingsPage state={state} controller={controller} back={() => setPanel("menu")} onNavigate={navigate} density={density} onDensity={value => { setDensity(value); saveListDensity(value); }} />}{(panel === "apps" || panel === "workspaces" || panel === "automations") && <WorkspacePage page={panel} state={state} controller={controller} source={source} onWorkspace={changeWorkspace} back={() => setPanel(returnPanel)} />}</main>;
+  return <main className={`app-shell ${state.selected ? "has-selection" : ""}`}><BotList controller={controller} state={state} onMenu={() => setPanel("menu")} source={source} onWorkspace={changeWorkspace} density={density} /><Chat controller={controller} state={state} />{panel === "menu" && <MenuSheet state={state} onNavigate={navigate} close={() => setPanel(null)} />}{panel === "settings" && <SettingsPage state={state} controller={controller} back={() => setPanel(null)} onNavigate={navigate} density={density} onDensity={value => { setDensity(value); saveListDensity(value); }} />}{(panel === "apps" || panel === "workspaces" || panel === "automations") && <WorkspacePage page={panel} state={state} controller={controller} source={source} onWorkspace={changeWorkspace} back={() => setPanel(returnPanel)} />}</main>;
 }

@@ -82,7 +82,7 @@ svg { flex-shrink: 0; }
 .bot-role { font-size: 11px; color: var(--color-ink-secondary); margin-top: 3px; }
 .bot-preview { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 7px; color: var(--color-ink-secondary); font-size: 13px; line-height: 1.4; }
 .bot-preview > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.unread-badge { display: grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 20px; background: var(--color-ink); color: var(--color-app); font-size: 10px; line-height: 1; flex: none; }
+.unread-badge { width: 8px; height: 8px; border-radius: 50%; background: var(--color-danger); flex: none; }
 .notification-invite { display: flex; align-items: center; gap: 11px; border-top: 1px solid var(--color-edge); padding: 19px 24px 13px; }
 .notification-icon { color: var(--color-ink-secondary); }
 .notification-invite div { flex: 1; display: flex; flex-direction: column; gap: 5px; }
@@ -198,7 +198,7 @@ svg { flex-shrink: 0; }
 .workspace-switch { display: flex; gap: 4px; margin: 0 20px 12px; padding: 4px; border-radius: 10px; background: var(--color-inset); overflow-x: auto; flex: none; }
 .workspace-switch button { display: flex; justify-content: center; align-items: center; gap: 7px; min-height: 42px; padding: 6px 12px; border-radius: 7px; flex: 1 0 auto; font-size: 13px; color: var(--color-ink-secondary); }
 .workspace-switch button[aria-pressed="true"] { background: var(--color-panel); color: var(--color-ink); box-shadow: 0 1px 4px #0001; }
-.workspace-switch i, .unread-badge { min-width: 6px; width: 6px; height: 6px; padding: 0; background: var(--color-accent); border-radius: 50%; }
+.workspace-switch i { min-width: 6px; width: 6px; height: 6px; padding: 0; background: var(--color-accent); border-radius: 50%; }
 .bot-row, .bot-row.selected { gap: 10px; padding: 10px 12px; min-height: 64px; border-radius: 8px; }
 .bot-row.selected { background: var(--color-raised); }
 .bot-row:hover { background: var(--color-raised); }
@@ -276,12 +276,17 @@ svg { flex-shrink: 0; }
 .coordinator { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 100%; padding: 8px 16px 14px; }
 .coordinator-avatar { position: relative; display: flex; margin-bottom: 4px; }
 .coordinator-crown { position: absolute; top: -4px; left: -4px; color: var(--color-accent); }
-.coordinator-unread { position: absolute; right: 0; top: 0; width: 9px; height: 9px; border-radius: 50%; background: var(--color-accent); }
+.coordinator-unread { position: absolute; right: 0; top: 0; width: 9px; height: 9px; border-radius: 50%; background: var(--color-danger); }
 .coordinator strong { font-size: 17px; font-weight: 600; }
 .coordinator > span:not(.coordinator-avatar) { font-size: 11px; color: var(--color-ink-secondary); }
 .coordinator p { max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--color-ink-secondary); font-size: 12px; }
-.department-heading { display: flex; align-items: center; gap: 12px; margin: 24px 12px 8px; font-size: 13px; font-weight: 500; color: var(--color-ink-secondary); }
-.department-heading i { border-top: 1px solid var(--color-edge); flex: 1; }
+.department-heading { margin: 12px 0 0; font-size: 13px; font-weight: 500; color: var(--color-ink-secondary); }
+.department-toggle { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; padding: 8px 12px; text-align: left; }
+.department-toggle > svg { flex: none; transition: transform .15s; }
+.department-toggle > svg.expanded { transform: rotate(90deg); }
+.department-toggle > span:first-of-type { min-width: 0; overflow-wrap: anywhere; }
+.department-toggle > i { border-top: 1px solid var(--color-edge); flex: 1; min-width: 12px; }
+.department-unread { flex: none; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px; background: var(--color-danger); color: var(--color-danger-ink); font-size: 11px; line-height: 20px; text-align: center; font-variant-numeric: tabular-nums; }
 .directory-section .bot-row { min-height: 78px; padding: 13px 12px; gap: 13px; }
 .directory-section .bot-row + .bot-row::before { display: none; }
 .directory-section .bot-row-heading strong { font-size: 16px; font-weight: 600; }

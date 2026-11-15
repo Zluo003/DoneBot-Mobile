@@ -56,6 +56,20 @@ histories.get("thread-xiaolu").push({ id: "files", role: "bot", kind: "text", te
   { kind: "file", path: "/fixture/guide.pdf", mime: "application/pdf", name: "使用指南.pdf" },
 ] });
 histories.get("thread-xiaolu").push({ id: "generated-image", role: "bot", kind: "text", text: "", timestamp: at(0), attachments: [{ kind: "image", path: "/fixture/jimeng-image-generate-20261114155450727-fixture.png", mime: "image/png", name: "生成图片.png" }] });
+if (process.env.MOBILE_ATTENTION_FIXTURE === "1") {
+  bots[0].busy = true;
+  bots[1].busy = true; bots[1].unread = true; bots[1].lastReadMessageId = "c1";
+  bots.splice(1, 0, { id: "writer", name: "小林", section: "内容与创作", color: "green", threadId: "thread-writer", workspaceId: "macbook", unread: true, busy: true, lastReadMessageId: "writer-4" });
+  bots.push({ id: "cloud-writer", name: "Cloud 创作", section: "内容与创作", color: "blue", threadId: "thread-cloud-writer", workspaceId: "cloud", unread: true, busy: false });
+  histories.set("thread-writer", Array.from({ length: 65 }, (_, i) => ({ id: `writer-${i}`, role: "bot", kind: "text", text: `合成未读消息 ${i}`, timestamp: at(65 - i) })));
+  histories.set("thread-cloud-writer", [{ id: "cloud-1", role: "bot", kind: "text", text: "Cloud 合成消息", timestamp: at(1) }]);
+}
+const messagePage = (threadId, limit, before) => {
+  const all = histories.get(threadId) ?? [];
+  const end = before ? all.findIndex(message => message.id === before) : all.length;
+  const start = Math.max(0, end - limit);
+  return { messages: all.slice(start, end), hasMore: start > 0 };
+};
 const raw = async req => { const chunks = []; let size = 0; for await (const chunk of req) { size += chunk.length; if (size > 10 * 1024 * 1024) throw new Error("oversized"); chunks.push(chunk); } return Buffer.concat(chunks); };
 const binary = (res, file) => { res.writeHead(200, { "content-type": file.mime, "content-length": file.bytes.length, "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(file.name)}` }); res.end(file.bytes); };
 const desktopFixture = process.env.MOBILE_DESKTOP_FIXTURE_URL ? new URL(process.env.MOBILE_DESKTOP_FIXTURE_URL) : null;
@@ -85,12 +99,12 @@ const rpc = http.createServer(async (req, res) => {
       return json(res, 200, { [toggle[1] === "routines" ? "routine" : toggle[1] === "webhooks" ? "webhook" : "trigger"]: item });
     }
     if (req.method === "GET" && url.pathname === "/api/bots") return json(res, 200, {
-      bots: bots.filter(bot => !workspace || bot.workspaceId === workspace).map(bot => ({ ...bot, messages: histories.get(bot.threadId).slice(-Number(url.searchParams.get("messages") || 1)) })),
-      sections: workspace === "cloud" ? [] : ["内容与创作"],
-      groups: groups.filter(group => !workspace || group.workspaceId === workspace).map(group => ({ ...group, messages: histories.get(group.threadId).slice(-Number(url.searchParams.get("messages") || 1)) })),
+      bots: bots.filter(bot => !workspace || bot.workspaceId === workspace).map(bot => ({ ...bot, ...messagePage(bot.threadId, Number(url.searchParams.get("messages") || 1)) })),
+      sections: workspace === "cloud" && process.env.MOBILE_ATTENTION_FIXTURE !== "1" ? [] : ["内容与创作"],
+      groups: groups.filter(group => !workspace || group.workspaceId === workspace).map(group => ({ ...group, ...messagePage(group.threadId, Number(url.searchParams.get("messages") || 1)) })),
     });
     const thread = /^\/api\/threads\/([^/]+)\/messages$/.exec(url.pathname);
-    if (thread && req.method === "GET") return json(res, 200, { messages: histories.get(thread[1]) ?? [], hasMore: false });
+    if (thread && req.method === "GET") return json(res, 200, messagePage(thread[1], Number(url.searchParams.get("limit") || 50), url.searchParams.get("before")));
     if (req.method === "GET" && url.pathname === "/api/attachments/fixture-avatar.png") return binary(res, files.get(url.pathname));
     if (req.method === "POST" && url.pathname === "/api/attachments") {
       const id = url.searchParams.get("uploadId");
@@ -111,7 +125,7 @@ const rpc = http.createServer(async (req, res) => {
       const body = await read(req);
       const bot = (target[1] === "groups" ? groups : bots).find(bot => bot.id === target[2]);
       if (!bot) return json(res, 404, {});
-      if (target[3] === "read") { bot.unread = false; return json(res, 200, { ok: true }); }
+      if (target[3] === "read") { bot.unread = false; bot.lastReadMessageId = histories.get(bot.threadId)?.at(-1)?.id; return json(res, 200, { ok: true }); }
       if (!body.text || !body.sendId || body.threadId !== bot.threadId) return json(res, 400, {});
       if (received.has(body.sendId)) return json(res, 200, { threadId: bot.threadId });
       received.add(body.sendId);

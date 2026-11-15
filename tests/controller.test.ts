@@ -291,6 +291,67 @@ describe("mobile attachment isolation", () => {
 });
 
 describe("departments and group conversations", () => {
+  it("counts all unread messages across paged tasks and groups without marking them read, and persists totals", async () => {
+    const fx = fixture(), original = fx.request.getMockImplementation()!;
+    const messages = Array.from({ length: 75 }, (_, i) => ({ id: `m-${i}`, role: "bot", text: `${i}` }));
+    let marker = "m-4";
+    fx.request.mockImplementation(async (path, options) => {
+      if (path.startsWith("/api/bots?")) return { bots: [{ ...fx.bots[0], section: "Studio", unread: true, messages: messages.slice(-20), hasMore: true,
+        tasks: [{ threadId: "thread-one", unread: true, lastReadMessageId: marker, updatedAt: messages.length }, { threadId: "other-one", unread: true, updatedAt: 1 }] }],
+        groups: [{ id: "room", name: "Room", threadId: "room-thread", memberIds: ["one"], section: "Studio", unread: true, lastReadMessageId: "read", messages: [{ id: "read", role: "bot" }, { id: "new", role: "bot" }], hasMore: false }] };
+      if (path.startsWith("/api/threads/thread-one/messages")) {
+        const url = new URL(path, "http://fixture.invalid"), before = url.searchParams.get("before");
+        const end = before ? messages.findIndex(message => message.id === before) : messages.length;
+        return { messages: messages.slice(Math.max(0, end - 50), end), hasMore: end > 50 };
+      }
+      if (path.startsWith("/api/threads/other-one/")) return { messages: [{ id: "other-reply", role: "bot" }, { id: "other-user", role: "user" }], hasMore: false };
+      return original(path, options);
+    });
+    await fx.login();
+    await vi.waitFor(() => expect(fx.controller.snapshot().bots.map(bot => bot.unreadCount)).toEqual([71, 1]));
+    expect(fx.request.mock.calls.some(([path]) => path.endsWith("/read"))).toBe(false);
+    expect(fx.request).toHaveBeenCalledWith("/api/threads/thread-one/messages?limit=50&before=m-55");
+    expect(fx.request).toHaveBeenCalledWith("/api/threads/thread-one/messages?limit=50&before=m-5");
+    await vi.waitFor(async () => {
+      const saved = JSON.parse((await fx.platform.cache.readState("account"))!);
+      expect(saved.bots.map((bot: { unreadCount: number }) => bot.unreadCount)).toEqual([71, 1]);
+      expect(saved.conversations.find(([key]: [string]) => key === "computer/one/thread-one")[1].messages).toHaveLength(75);
+    });
+    fx.request.mockClear(); await fx.controller.refresh();
+    expect(fx.request.mock.calls.filter(([path]) => path.startsWith("/api/threads/"))).toHaveLength(0);
+    marker = "m-73"; await fx.controller.refresh();
+    await vi.waitFor(() => expect(fx.controller.snapshot().bots[0].unreadCount).toBe(2));
+    await fx.controller.select(fx.controller.snapshot().bots[0]);
+    expect(fx.controller.snapshot().bots[0].unread).toBe(true);
+    expect(fx.controller.snapshot().bots[0].tasks.find(task => task.threadId === "other-one")?.unread).toBe(true);
+  });
+
+  it("ignores a late unread count after the conversation is read or the account logs out", async () => {
+    const fx = fixture(), original = fx.request.getMockImplementation()!, held = deferred<unknown>();
+    fx.request.mockImplementation(async (path, options) => {
+      if (path.startsWith("/api/bots?")) return { bots: [{ ...fx.bots[0], unread: true }] };
+      if (path.startsWith("/api/threads/")) return held.promise;
+      return original(path, options);
+    });
+    await fx.login();
+    await vi.waitFor(() => expect(fx.request.mock.calls.some(([path]) => path.startsWith("/api/threads/"))).toBe(true));
+    const selecting = fx.controller.select(fx.controller.snapshot().bots[0]);
+    held.resolve({ messages: [{ id: "reply", role: "bot" }], hasMore: false }); await selecting;
+    expect(fx.controller.snapshot().bots[0]).toMatchObject({ unread: false, unreadCount: 0 });
+    fx.controller.back();
+    const afterLogout = deferred<unknown>();
+    fx.request.mockImplementation(async (path, options) => {
+      if (path.startsWith("/api/bots?")) return { bots: [{ ...fx.bots[0], unread: true, messages: [{ id: "new-reply", role: "bot" }] }] };
+      if (path.startsWith("/api/threads/")) return afterLogout.promise;
+      return original(path, options);
+    });
+    await fx.controller.refresh(); await fx.controller.logout();
+    afterLogout.resolve({ messages: [{ id: "new-reply", role: "bot" }], hasMore: false });
+    await Promise.resolve();
+    expect(fx.controller.snapshot().bots).toEqual([]);
+    expect(await fx.platform.cache.readState("account")).toBeNull();
+  });
+
   it("keeps department metadata and sends and reads a group through the original group routes", async () => {
     const fx = fixture(), original = fx.request.getMockImplementation()!;
     const replies = [

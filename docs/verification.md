@@ -176,3 +176,17 @@ iOS 原生 PDF / Office 预览、保存位置、分享目标与摄像头仍需�
 Chromium 检查没有控制台错误。Playwright WebKit 在加载合成音视频时报告其内置媒体控件图标资源错误，以上 WebKit 结果仅用于外框、图片触摸与布局检查，不作为真机音视频兼容性证明。
 
 以上均为独立合成数据与浏览器触摸检查，未安装到用户真机。此轮仅需更新手机 App，无需更新桌面或线上服务。
+
+## 部门折叠、未读条数与工作状态（2026-11-15）
+
+部门标题支持展开和折叠，状态按账号、电脑 / Cloud 和部门分别保存；搜索期间临时展示匹配成员，清除搜索后恢复折叠状态。部门负责人稳定排在成员列表第一位。折叠时右侧汇总实际未读消息条数，展开时各 Bot 显示红点；主协调 Bot 和普通 Bot 均独立显示工作绿点，可与红点同时存在。设置页通过按钮、Esc 或左滑返回时直接回到聊天主界面。
+
+未读条数复用原版任务的 unread、lastReadMessageId、updatedAt 和只读消息分页接口，在手机端跨页计算；排除用户消息、工具活动、执行摘要、屏幕和压缩事件。查询不调用 read 接口；打开一个会话保留同 Bot 其他会话的未读状态。相同未读范围复用结果，无更新元数据的其他会话每 30 秒重新计算；计算中或无法定位已读位置时显示省略号，不把不完整历史当作准确条数。补取的消息页和计算结果进入账号离线缓存。
+
+- `pnpm test`：10 个文件、79 项通过。新增检查覆盖跨多页未读、多个任务与群聊汇总、读标记变化、工作空间隔离、缓存复用、缺失读标记、失败重试、迟到结果与退出后的账号隔离。日志：`output/departments-tests.log`。
+- `pnpm ios:build`：TypeScript、正式网页构建、Capacitor 同步与 iOS 模拟器编译通过。日志：`output/departments-ios-build.log`。
+- 通过 `MOBILE_FIXTURE_PORT=5192 MOBILE_ATTENTION_FIXTURE=1 pnpm dev:fixture` 启动独立合成数据。普通成员刻意排在负责人之前，验证显示顺序仍为负责人、小林、群聊。小林的历史包含 65 条消息，已读位置为第 5 条，未读 60 条；部门初始汇总为 63，阅读小鹿后为 61，阅读小林并收到新回复后为 2。查询统计不消除其他会话的红点，工作结束后绿点消失。
+- Chromium 在 390×844 验证红绿点同时显示及实际颜色、折叠后隐藏成员、刷新保存、搜索临时展开、Cloud 同名部门隔离、数量变化和设置按钮 / Esc 返回。真实触摸输入验证设置左滑后无菜单残留。证据：`output/playwright/departments-check.log`、`departments-settings-swipe.log`。
+- WebKit 的手机触摸模式验证负责人置顶、主协调红绿点、点按折叠、搜索恢复、设置点按返回，以及 320×568 深色无溢出、44px 点击区域和无焦点外框。证据：`output/playwright/departments-webkit-check.log`。截图包括 `departments-expanded.png`、`departments-unread-63.png`、`departments-narrow-dark.png`、`departments-webkit-dark.png`，均在 `output/playwright/`。
+
+此轮只修改手机项目，需重新打包安装手机 App。未安装到用户真机，未修改桌面原版服务或部署线上服务。
