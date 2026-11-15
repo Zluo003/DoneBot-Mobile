@@ -6,6 +6,7 @@ import { Share } from "@capacitor/share";
 import { Buffer } from "buffer";
 import type { MediaPlatform, PickedImage } from "../core/contracts";
 import { mediaKind } from "../core/media";
+import { documentAccept } from "../core/documents";
 
 const documents = registerPlugin<{
   save(options: { uri: string }): Promise<void>;
@@ -22,7 +23,19 @@ async function picked(path: string, format: string): Promise<PickedImage> {
   return { blob: blob.type ? blob : new Blob([blob], { type: `image/${format}` }), name: `照片-${Date.now()}.${format}` };
 }
 
+function pickDocuments(): Promise<PickedImage[]> {
+  return new Promise(resolve => {
+    const input = document.createElement("input");
+    input.type = "file"; input.accept = documentAccept; input.multiple = true;
+    const finish = (files: PickedImage[]) => { input.remove(); resolve(files); };
+    input.onchange = () => finish(Array.from(input.files ?? []).map(file => ({ name: file.name, blob: file })));
+    input.oncancel = () => finish([]);
+    input.hidden = true; document.body.append(input); input.click();
+  });
+}
+
 export const nativeMedia: MediaPlatform = {
+  pickDocuments,
   async pickImages(source) {
     try {
       if (source === "camera") {
@@ -63,6 +76,7 @@ export const nativeMedia: MediaPlatform = {
 };
 
 export const webMedia: MediaPlatform = {
+  pickDocuments,
   async pickImages(source) {
     return new Promise(resolve => {
       const input = document.createElement("input");

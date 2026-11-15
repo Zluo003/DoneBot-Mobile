@@ -83,7 +83,7 @@ export function responseError(status: number, body: unknown, binary = false): Er
 
 interface Pending {
   chunks: Buffer[]; bytes: number; outgoing: Buffer; binary: boolean; limit: number;
-  resolve(value: unknown): void; reject(error: Error): void; cleanup(): void;
+  resolve(value: unknown): void; reject(error: Error): void; cleanup(): void; progress(): void;
 }
 
 export class RelayConnection implements WorkspaceConnection {
@@ -96,6 +96,7 @@ export class RelayConnection implements WorkspaceConnection {
   private ping = 0;
   private drain: ReturnType<typeof setTimeout> | undefined;
   private constructor(private socket: WebSocket, private descriptor: ConnectionDescriptor) {}
+  get closed(): boolean { return !this.mux || this.socket.readyState !== WebSocket.OPEN; }
 
   static async connect(descriptor: ConnectionDescriptor): Promise<RelayConnection> {
     let last: unknown;
@@ -130,7 +131,9 @@ export class RelayConnection implements WorkspaceConnection {
             connection.startMux(); clearTimeout(deadline); resolve(connection);
           } else {
             if (!(event.data instanceof ArrayBuffer)) throw new NoiseError("record_binary");
-            connection.mux!.receive(decodeFrame(connection.keys.receive.open(new Uint8Array(event.data))));
+            const frame = decodeFrame(connection.keys.receive.open(new Uint8Array(event.data)));
+            clearTimeout(connection.pingDeadline); connection.pingDeadline = undefined;
+            connection.mux!.receive(frame);
           }
         } catch (error) { fail(error instanceof Error ? error : new Error("加密连接已中断。")); }
       };
@@ -146,7 +149,7 @@ export class RelayConnection implements WorkspaceConnection {
         if (!pending) return;
         pending.bytes += data.length;
         if (pending.bytes > pending.limit) { this.failRequest(id, new Error(pending.binary ? "文件超过手机端 100 MB 的读取上限。" : "设备返回的消息过大。")); return; }
-        pending.chunks.push(Buffer.from(data)); this.mux!.consumed(id, data.length);
+        pending.progress(); pending.chunks.push(Buffer.from(data)); this.mux!.consumed(id, data.length);
       },
       ended: id => {
         const pending = this.pending.get(id);
@@ -155,6 +158,7 @@ export class RelayConnection implements WorkspaceConnection {
         this.mux!.finish(id);
         try {
           const reply = decodeHttp(Buffer.concat(pending.chunks), pending.binary);
+          if (pending.binary && ((reply.body as { data?: Uint8Array })?.data?.length ?? 0) > MAX_FILE_BYTES) throw new Error("文件超过手机端 100 MB 的读取上限。");
           if (reply.status < 200 || reply.status >= 300) throw responseError(reply.status, reply.body, pending.binary);
           pending.resolve(reply.body);
         } catch (error) { pending.reject(error instanceof Error ? error : new Error("设备响应无法读取。")); }
@@ -183,6 +187,7 @@ export class RelayConnection implements WorkspaceConnection {
       }
       const written = this.mux.write(id, pending.outgoing);
       if (!written) return;
+      pending.progress();
       pending.outgoing = pending.outgoing.subarray(written);
     }
   }
@@ -195,7 +200,7 @@ export class RelayConnection implements WorkspaceConnection {
     if (!this.mux || this.socket.readyState !== WebSocket.OPEN) throw new Error("设备已离线，请重新连接。");
     options.signal?.throwIfAborted();
     const body = options.rawBody ? Buffer.from(options.rawBody) : options.body === undefined ? Buffer.alloc(0) : Buffer.from(JSON.stringify(options.body));
-    if (body.length > (options.rawBody ? 10 * 1024 * 1024 : 128 * 1024)) throw new Error("消息过长，请缩短后发送。");
+    if (body.length > (options.rawBody ? path.startsWith("/api/files?") ? MAX_FILE_BYTES : 10 * 1024 * 1024 : 128 * 1024)) throw new Error("附件或消息超过大小上限。");
     if (!/^omb_[A-Za-z0-9_-]+$/.test(this.descriptor.deviceToken)) throw new Error("设备授权凭据无效。");
     const contentType = options.rawBody ? options.contentType ?? "application/octet-stream" : "application/json";
     if (!/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(contentType)) throw new Error("附件格式无效。");
@@ -203,9 +208,12 @@ export class RelayConnection implements WorkspaceConnection {
     return new Promise<T>((resolve, reject) => {
       const id = this.mux!.open();
       const abort = () => this.failRequest(id, new Error("操作已取消。"));
-      const timeout = setTimeout(() => this.failRequest(id, new Error("传输超时，请重试。")), options.responseType ? 180_000 : 30_000);
+      const streaming = Boolean(options.responseType || options.rawBody);
+      const expired = () => this.failRequest(id, new Error("传输长时间没有进展，请重试。"));
+      let timeout = setTimeout(expired, streaming ? 180_000 : 30_000);
+      const progress = () => { if (streaming) { clearTimeout(timeout); timeout = setTimeout(expired, 180_000); } };
       const cleanup = () => { clearTimeout(timeout); options.signal?.removeEventListener("abort", abort); };
-      this.pending.set(id, { binary: options.responseType === "bytes", limit: (options.responseType ? MAX_FILE_BYTES : MAX_RESPONSE) + 32 * 1024, chunks: [], bytes: 0, outgoing: Buffer.concat([head, body]), resolve: value => resolve(value as T), reject, cleanup });
+      this.pending.set(id, { binary: options.responseType === "bytes", limit: options.responseType ? MAX_FILE_BYTES + 1024 * 1024 : MAX_RESPONSE + 32 * 1024, chunks: [], bytes: 0, outgoing: Buffer.concat([head, body]), resolve: value => resolve(value as T), reject, cleanup, progress });
       options.signal?.addEventListener("abort", abort, { once: true });
       this.flush(id);
     });
@@ -220,6 +228,12 @@ export class RelayConnection implements WorkspaceConnection {
 }
 
 export function mobileRequestAllowed(method: string, path: string): boolean {
+  if (method === "POST" && path.startsWith("/api/files?")) {
+    const url = new URL(path, "https://mobile.invalid"), name = url.searchParams.get("name") ?? "";
+    return url.pathname === "/api/files" && !url.hash && url.searchParams.size === 2
+      && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(url.searchParams.get("uploadId") ?? "")
+      && /^[^/\\\x00-\x1f]{1,180}$/.test(name) && name !== "." && name !== "..";
+  }
   if (method === "PATCH") return /^\/api\/routines\/[A-Za-z0-9_-]+$/.test(path);
   if (method === "POST") return /^\/api\/(bots|groups)\/[A-Za-z0-9_-]+\/(messages|read)$/.test(path)
     || /^\/api\/(webhooks|app-triggers)\/[A-Za-z0-9_-]+\/enabled$/.test(path)

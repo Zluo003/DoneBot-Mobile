@@ -70,7 +70,7 @@ const messagePage = (threadId, limit, before) => {
   const start = Math.max(0, end - limit);
   return { messages: all.slice(start, end), hasMore: start > 0 };
 };
-const raw = async req => { const chunks = []; let size = 0; for await (const chunk of req) { size += chunk.length; if (size > 10 * 1024 * 1024) throw new Error("oversized"); chunks.push(chunk); } return Buffer.concat(chunks); };
+const raw = async (req, limit = 10 * 1024 * 1024) => { const chunks = []; let size = 0; for await (const chunk of req) { size += chunk.length; if (size > limit) throw new Error("oversized"); chunks.push(chunk); } return Buffer.concat(chunks); };
 const binary = (res, file) => { res.writeHead(200, { "content-type": file.mime, "content-length": file.bytes.length, "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(file.name)}` }); res.end(file.bytes); };
 const desktopFixture = process.env.MOBILE_DESKTOP_FIXTURE_URL ? new URL(process.env.MOBILE_DESKTOP_FIXTURE_URL) : null;
 if (desktopFixture && (desktopFixture.protocol !== "http:" || desktopFixture.hostname !== "127.0.0.1" || !desktopFixture.port || desktopFixture.pathname !== "/" || desktopFixture.search || desktopFixture.hash || desktopFixture.username || desktopFixture.password)) throw new Error("Only an explicitly launched loopback fixture is supported");
@@ -111,6 +111,12 @@ const rpc = http.createServer(async (req, res) => {
       const path = `/api/attachments/${id}.png`;
       const bytes = await raw(req);
       files.set(path, { bytes, mime: req.headers["content-type"], name: "上传图片.png" });
+      return json(res, 201, { path, mime: req.headers["content-type"], bytes: bytes.length });
+    }
+    if (req.method === "POST" && url.pathname === "/api/files") {
+      const name = url.searchParams.get("name"), path = `/fixture/uploads/${url.searchParams.get("uploadId")}/${name}`;
+      const bytes = await raw(req, 100 * 1024 * 1024);
+      files.set(path, { bytes, mime: req.headers["content-type"], name });
       return json(res, 201, { path, mime: req.headers["content-type"], bytes: bytes.length });
     }
     const download = /^\/api\/threads\/([^/]+)\/messages\/([^/]+)\/file$/.exec(url.pathname);

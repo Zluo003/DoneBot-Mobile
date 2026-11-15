@@ -9,6 +9,7 @@ import { MAUS_COLORS, CHROME_GRADIENT, CHROME_EYES, type MausColor } from "../de
 import { avatarCropRadius, botAvatarProfile, clampAvatarZoom, clampAvatarFocus, mascotFaceInk } from "../desktop/avatar/bot-avatar";
 
 import steel from "../desktop/avatar/steel-images.json";
+import { avatarExpression, avatarState } from "./avatar-state";
 function mix(hex: string, toward: number, ratio: number): string {
   const value = parseInt(hex.slice(1), 16);
   return `#${[16, 8, 0].map(shift => Math.round(((value >> shift) & 255) * (1 - ratio) + toward * ratio).toString(16).padStart(2, "0")).join("")}`;
@@ -33,7 +34,7 @@ export function Avatar({ bot, controller, small = false, size: requestedSize }: 
   const picture = steel.includes(`${body}-128.webp`) ? `/mascot-steel/${body}-128.webp` : null;
   return <span className={`avatar ${small ? "small" : ""}`} style={{ width: size, height: size }} aria-hidden="true">
     {path && image?.path === `${bot.workspace.id}/${path}` ? <span className="avatar-crop" style={{ borderRadius: avatarCropRadius(profile.avatarCrop) }}><img src={image.url} alt="" onError={() => setImage(undefined)} style={{ objectPosition: origin, transform: `scale(${clampAvatarZoom(bot.avatarZoom)})`, transformOrigin: origin }} /></span>
-      : bot.mascotBody && Object.hasOwn(CARVED_BODIES, bot.mascotBody) ? <CarvedAvatar body={bot.mascotBody as keyof typeof CARVED_BODIES} color={color} size={size} state={bot.busy ? "working" : "idle"} faceColor={bot.mascotFaceColor} trackPointer={false} />
-        : <CursorAvatar size={size} state={bot.busy ? "working" : "idle"} expression={bot.mascotExpression ?? undefined} silhouette={MASCOT_BODIES[body]} gradient={gradient} picture={color === "chrome" && !faceInk ? picture : null} eyeColor={faceInk ?? (color === "chrome" ? CHROME_EYES : undefined)} eyeScale={1.12} showMouth mouthStroke={11} title={null} />}
+      : bot.mascotBody && Object.hasOwn(CARVED_BODIES, bot.mascotBody) ? <CarvedAvatar body={bot.mascotBody as keyof typeof CARVED_BODIES} color={color} size={size} state={avatarState(bot)} faceColor={bot.mascotFaceColor} trackPointer={false} />
+        : <CursorAvatar size={size} state={avatarState(bot)} expression={avatarExpression(bot)} silhouette={MASCOT_BODIES[body]} gradient={gradient} picture={color === "chrome" && !faceInk ? picture : null} eyeColor={faceInk ?? (color === "chrome" ? CHROME_EYES : undefined)} eyeScale={1.12} showMouth mouthStroke={11} title={null} />}
   </span>;
 }

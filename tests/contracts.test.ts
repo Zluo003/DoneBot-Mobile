@@ -33,3 +33,12 @@ describe("desktop default Bot contract", () => {
     expect(errorMessage(new Error("设备离线"))).toBe("设备离线");
   });
 });
+
+describe("desktop mascot expression contract", () => {
+  it("accepts named desktop expressions alongside numeric cache entries without dropping bots", () => {
+    const expressions = ["proud", "happy", "working", "future-expression", 7, null, undefined];
+    const reply = directorySchema.parse({ bots: expressions.map((mascotExpression, index) => ({ ...base, id: `bot-${index}`, mascotExpression })) });
+    expect(reply.bots.map(bot => bot.mascotExpression)).toEqual(expressions);
+    expect(directorySchema.parse(JSON.parse(JSON.stringify(reply))).bots).toHaveLength(expressions.length);
+  });
+});

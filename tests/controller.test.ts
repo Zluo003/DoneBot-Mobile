@@ -24,7 +24,7 @@ function fixture() {
   const platform: Platform = {
     kind: "ios",
     cache: indexedDBStorage(`test-${crypto.randomUUID()}`),
-    media: { pickImages: async () => [], fileAction: async () => {}, clear: async () => {} },
+    media: { pickImages: async () => [], pickDocuments: async () => [], fileAction: async () => {}, clear: async () => {} },
     vault: { read: async key => values.get(key) ?? null, write: async (key, value) => { values.set(key, value); }, remove: async key => { values.delete(key); } },
     push: {
       permission: vi.fn(async () => "granted" as const), register: vi.fn(async () => registration), unregister: vi.fn(async () => {}),
@@ -136,13 +136,16 @@ describe("offline conversations and automatic file caching", () => {
     });
     return fx;
   }
-  it("downloads photos, videos and documents from synchronized messages before they are opened", async () => {
+  it("preloads images and caches videos and documents when opened without refetching", async () => {
     const fx = withFiles(); await fx.login();
     const bot = fx.controller.snapshot().bots[0];
     expect(fx.controller.snapshot().selected).toBeNull();
     await vi.waitFor(async () => {
-      for (const path of ["/picture.png", "/movie.mp4", "/report.pdf"]) expect(await fx.platform.cache.hasFile("account", cachedFileKey(bot, "synced", path))).toBe(true);
+      expect(await fx.platform.cache.hasFile("account", cachedFileKey(bot, "synced", "/picture.png"))).toBe(true);
     });
+    expect(fx.request.mock.calls.filter(([path]) => path.endsWith("/file"))).toHaveLength(1);
+    await fx.controller.file(bot, "synced", "/movie.mp4");
+    await fx.controller.file(bot, "synced", "/report.pdf");
     expect(fx.request.mock.calls.filter(([path]) => path.endsWith("/file"))).toHaveLength(3);
     await fx.controller.file(bot, "synced", "/picture.png"); await fx.controller.refresh();
     expect(fx.request.mock.calls.filter(([path]) => path.endsWith("/file"))).toHaveLength(3);
@@ -151,6 +154,7 @@ describe("offline conversations and automatic file caching", () => {
     const fx = withFiles(); await fx.login();
     const bot = fx.controller.snapshot().bots[0];
     await fx.controller.select(bot);
+    await fx.controller.file(bot, "synced", "/movie.mp4");
     await vi.waitFor(async () => expect(await fx.platform.cache.hasFile("account", cachedFileKey(bot, "synced", "/movie.mp4"))).toBe(true));
     const session = JSON.parse(fx.values.get("donebot.session.v1")!); session.expiresAt = 1;
     fx.values.set("donebot.session.v1", JSON.stringify(session));
@@ -167,6 +171,47 @@ describe("offline conversations and automatic file caching", () => {
     expect(new TextDecoder().decode(movie.data)).toBe("contents:movie.mp4");
     expect(connect).not.toHaveBeenCalled(); expect(fx.values.has("donebot.session.v1")).toBe(true);
     await expect(restarted.file(restarted.selectedBot()!, "never-synced", "/absent.pdf")).rejects.toThrow("尚未缓存");
+  });
+  it("keeps an external video downloading past three minutes while bytes arrive", async () => {
+    const fx = fixture(); await fx.login();
+    vi.useFakeTimers();
+    let stream!: ReadableStreamDefaultController<Uint8Array>, signal!: AbortSignal;
+    fx.fetcher.mockImplementationOnce(async (_url, options) => {
+      signal = options!.signal!;
+      return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+        stream = controller;
+        signal.addEventListener("abort", () => controller.error(signal.reason), { once: true });
+      } }), { headers: { "content-type": "video/mp4" } });
+    });
+    const reading = fx.controller.file(fx.controller.snapshot().bots[0], "video", "https://media.example.test/long.mp4");
+    await vi.waitFor(() => expect(stream).toBeDefined());
+    for (let chunk = 0; chunk < 5; chunk++) {
+      await vi.advanceTimersByTimeAsync(60_000);
+      stream.enqueue(new Uint8Array([chunk]));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(signal.aborted).toBe(false);
+    }
+    stream.close(); vi.useRealTimers();
+    expect(await reading).toMatchObject({ mime: "video/mp4", data: new Uint8Array([0, 1, 2, 3, 4]) });
+    expect(fx.controller.snapshot().session?.account.id).toBe("account");
+  });
+  it("aborts a stalled external download without signing out or closing the workspace", async () => {
+    const fx = fixture(); await fx.login();
+    vi.useFakeTimers();
+    let signal!: AbortSignal;
+    fx.fetcher.mockImplementationOnce(async (_url, options) => {
+      signal = options!.signal!;
+      return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+        signal.addEventListener("abort", () => controller.error(signal.reason), { once: true });
+      } }));
+    });
+    const result = expect(fx.controller.file(fx.controller.snapshot().bots[0], "video", "https://media.example.test/stalled.mp4")).rejects.toThrow("没有进度");
+    await vi.waitFor(() => expect(signal).toBeDefined());
+    await vi.advanceTimersByTimeAsync(180_001); await result;
+    expect(fx.controller.snapshot().session?.account.id).toBe("account");
+    expect(fx.connection.close).not.toHaveBeenCalled();
+    vi.useRealTimers(); await fx.controller.refresh();
+    expect(fx.controller.snapshot().bots).toHaveLength(2);
   });
   it("removes account data after pending disk writes and prevents a late transfer from recreating it", async () => {
     const fx = fixture(); await fx.login(); const bot = fx.controller.snapshot().bots[0];
@@ -236,6 +281,31 @@ describe("notification accounts and revocation", () => {
 });
 
 describe("mobile attachment isolation", () => {
+  it("uploads a document once and preserves the message identity after uncertain delivery", async () => {
+    const fx = fixture(); await fx.login(); await fx.controller.select(fx.controller.snapshot().bots[0]);
+    const name = '工作&"说明.pdf', blob = new Blob(["%PDF-1.4\nfixture"], { type: "" });
+    fx.platform.media.pickDocuments = async () => [{ name, blob }];
+    await fx.controller.pickDocuments();
+    const original = fx.request.getMockImplementation()!;
+    let delivered = false;
+    fx.request.mockImplementation(async (path, options) => {
+      if (path.startsWith("/api/files?")) return { path: "/private/note.pdf", mime: "application/pdf", bytes: blob.size };
+      if (path.endsWith("/messages") && options?.method === "POST") {
+        if (!delivered) throw new Error("Synthetic lost acknowledgement");
+        return { ok: true };
+      }
+      return original(path, options);
+    });
+    await fx.controller.send(); delivered = true; await fx.controller.send();
+    const uploads = fx.request.mock.calls.filter(([path]) => path.startsWith("/api/files?"));
+    expect(uploads).toHaveLength(1);
+    expect(new URL(uploads[0][0], "https://fixture.test").searchParams.get("name")).toBe(name);
+    const upload = uploads[0][1] as { rawBody: Uint8Array; contentType: string };
+    expect(upload.contentType).toBe("application/pdf"); expect(upload.rawBody.length).toBe(blob.size);
+    const sends = fx.request.mock.calls.filter(([, options]) => (options?.body as { sendId?: string })?.sendId);
+    expect(sends).toHaveLength(2); expect(sends[0][1]?.body).toEqual(sends[1][1]?.body);
+    expect(sends[0][1]?.body).toMatchObject({ text: '<attached-file path="/private/note.pdf" name="工作&amp;&quot;说明.pdf" />', threadId: "thread-one" });
+  });
   it("sends an image without text and preserves upload and send identities on retry", async () => {
     const fx = fixture(); await fx.login(); await fx.controller.select(fx.controller.snapshot().bots[0]);
     const blob = new Blob([new Uint8Array([137, 80, 78, 71])], { type: "image/png" });
@@ -288,6 +358,23 @@ describe("mobile attachment isolation", () => {
     held.resolve({ data: new Uint8Array([1]), mime: "application/pdf", name: "file.pdf" });
     await expect(reading).rejects.toThrow("账号已切换");
   });
+});
+
+it("retains a healthy transport after a single request error and reconnects a closed transport", async () => {
+  const fx = fixture(); await fx.login();
+  const original = fx.request.getMockImplementation()!;
+  fx.request.mockRejectedValueOnce(new Error("Synthetic JSON timeout"));
+  await fx.controller.refresh();
+  expect(fx.connection.close).not.toHaveBeenCalled();
+  expect(fx.controller.snapshot().bots[0].workspace.online).toBe(true);
+  fx.request.mockImplementation(original);
+  Object.defineProperty(fx.connection, "closed", { value: true });
+  const replacement: WorkspaceConnection = { request: fx.request as WorkspaceConnection["request"], close: vi.fn() };
+  fx.connect.mockResolvedValueOnce(replacement);
+  await fx.controller.refresh();
+  expect(fx.connect).toHaveBeenCalledTimes(2);
+  expect(fx.connection.close).toHaveBeenCalledOnce();
+  expect(fx.controller.snapshot().bots[0].workspace.online).toBe(true);
 });
 
 describe("departments and group conversations", () => {
@@ -602,4 +689,17 @@ it("does not close a recovered connection when a pre-background history request 
   held.reject(new Error("Suspended request closed")); await selecting;
   await fx.controller.pollMessages();
   expect(fx.connect).toHaveBeenCalledTimes(2);
+});
+
+it("keeps both computer and Cloud online when their Bots carry desktop expression names", async () => {
+  const fx = fixture();
+  Object.assign(fx.bots[0], { mascotExpression: "proud" });
+  Object.assign(fx.bots[1], { mascotExpression: "happy" });
+  fx.workspaces.push({ ...fx.workspace, id: "cloud", kind: "cloud" });
+  await fx.login();
+  const snapshot = fx.controller.snapshot();
+  expect(snapshot.sourceErrors).toEqual({});
+  expect(snapshot.bots).toHaveLength(4);
+  expect(snapshot.bots.every(bot => bot.workspace.online)).toBe(true);
+  expect(snapshot.bots.map(bot => bot.mascotExpression)).toEqual(["proud", "happy", "proud", "happy"]);
 });

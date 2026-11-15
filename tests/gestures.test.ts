@@ -8,6 +8,8 @@ describe("navigation gestures", () => {
     expect(swipeDirection(start, { x: 210, y: 310 }, 400)).toBe("down");
     for (const end of [{ x: 198, y: 204 }, { x: 210, y: 90 }, { x: 90, y: 310 }, { x: 300, y: 200 }]) expect(swipeDirection(start, end, 400)).toBeUndefined();
     expect(swipeDirection(start, { x: 90, y: 200 }, 1200)).toBeUndefined();
+    expect(swipeDirection({ x: 12, y: 200 }, { x: 130, y: 210 }, 400)).toBe("right");
+    expect(swipeDirection({ x: 40, y: 200 }, { x: 180, y: 210 }, 400)).toBeUndefined();
   });
 });
 

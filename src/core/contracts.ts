@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { mascotExpressionSchema } from "../desktop/avatar/bot-avatar";
 
 export const idSchema = z.string().min(1).max(200).regex(/^[A-Za-z0-9_.:-]+$/);
 export const accountSchema = z.object({ id: z.union([z.string(), z.number()]).transform(String), email: z.email(), username: z.string().optional() });
@@ -27,10 +28,11 @@ export const attachmentSchema = z.object({
 export type Attachment = z.infer<typeof attachmentSchema>;
 export interface BinaryFile { data: Uint8Array; mime: string; name: string }
 export interface PickedImage { name: string; blob: Blob }
-export interface DraftImage extends PickedImage { id: string; url: string; path?: string }
+export interface DraftImage extends PickedImage { id: string; url: string; path?: string; kind?: "image" | "file" }
 export type FileAction = "open" | "save" | "share";
 export interface MediaPlatform {
   pickImages(source: "camera" | "library"): Promise<PickedImage[]>;
+  pickDocuments(): Promise<PickedImage[]>;
   fileAction(file: Blob, name: string, action: FileAction): Promise<void>;
   clear(): Promise<void>;
 }
@@ -70,7 +72,7 @@ export const botSchema = z.object({
   title: z.string().optional(), emoji: z.string().optional(), color: z.string().optional(),
   avatarUrl: z.string().nullable().optional(), avatarCrop: z.enum(["mascot", "circle", "rounded", "square"]).optional(),
   avatarZoom: z.number().optional(), avatarFocusX: z.number().optional(), avatarFocusY: z.number().optional(),
-  mascotBody: z.string().nullable().optional(), mascotFaceColor: z.enum(["white", "black"]).nullable().optional(), mascotExpression: z.number().nullable().optional(),
+  mascotBody: z.string().nullable().optional(), mascotFaceColor: z.enum(["white", "black"]).nullable().optional(), mascotExpression: z.union([mascotExpressionSchema, z.number().finite()]),
   busy: z.boolean().default(false), messages: z.array(messageSchema).default([]),
   unread: z.boolean().default(false),
   unreadCount: z.number().int().nonnegative().optional(), lastReadMessageId: idSchema.optional(),
@@ -106,6 +108,7 @@ export interface Platform {
   onActiveChange(listener: (active: boolean) => void): Promise<() => void>;
 }
 export interface WorkspaceConnection {
+  readonly closed?: boolean;
   request<T>(path: string, options?: RequestOptions): Promise<T>;
   close(): void;
 }

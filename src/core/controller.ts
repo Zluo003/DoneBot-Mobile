@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { attentionVersion, readThread, UnreadMessages, unreadThreads } from "./attention";
 import { automationKey, automationPath, automationSchema, connectedAppsSchema, readAutomations, type Automation, type ConnectedApp } from "./automations";
-import { fileName, messageFiles, remoteReference } from "./media";
+import { fileName, messageFiles, mediaKind, remoteReference } from "./media";
+import { documentFile } from "./documents";
 import { AccountCache, cachedFileKey, mergeMessagePage, offlineSnapshot } from "./offline";
 import { MAX_FILE_BYTES } from "./relay";
 import { MobileApi } from "./api";
@@ -94,7 +95,9 @@ export class MobileController {
       const [workspaceId, botId, threadId] = key.split("/");
       const bot = this.state.bots.find(bot => bot.workspace.id === workspaceId && bot.id === botId);
       if (!bot) continue;
-      for (const message of page.messages) for (const attachment of messageFiles(message)) this.queueFiles({ ...bot, threadId }, message.id, attachment.path);
+      for (const message of page.messages) for (const attachment of messageFiles(message)) {
+        if (mediaKind(attachment.mime, attachment.name || fileName(attachment.path)) === "image" || attachment.kind === "image") this.queueFiles({ ...bot, threadId }, message.id, attachment.path);
+      }
     }
     this.drainFiles();
   }
@@ -270,7 +273,7 @@ export class MobileController {
     this.update({ session, phase: "ready", challenge: null, error: "" });
     void this.restorePush(); await this.refresh(); this.openNotification();
   }
-  private async connection(workspace: Workspace): Promise<WorkspaceConnection> {
+  private async connection(workspace: Workspace, retry = true): Promise<WorkspaceConnection> {
     const epoch = this.epoch, syncEpoch = this.syncEpoch;
     let existing = this.connections.get(workspace.id);
     if (!existing) {
@@ -285,12 +288,24 @@ export class MobileController {
       })();
       this.connections.set(workspace.id, existing);
     }
-    try { return await existing; }
+    try {
+      const connection = await existing;
+      if (connection.closed) {
+        this.evict(workspace.id);
+        if (retry) return this.connection(workspace, false);
+        throw new Error("设备连接已中断，请稍后重试。");
+      }
+      return connection;
+    }
     catch (error) { if (this.connections.get(workspace.id) === existing) this.connections.delete(workspace.id); throw error; }
   }
   private evict(id: string): void {
     const existing = this.connections.get(id);
     this.connections.delete(id); void existing?.then(connection => connection.close(), () => {});
+  }
+  private evictClosed(id: string): void {
+    const existing = this.connections.get(id);
+    void existing?.then(connection => { if (connection.closed && this.connections.get(id) === existing) this.evict(id); }, () => {});
   }
   private presence(): void {
     if (this.presenceFlight || Date.now() - this.presenceAt < 15_000) return;
@@ -316,7 +331,7 @@ export class MobileController {
         }
         const bots = this.state.bots.flatMap(bot => {
           const workspace = workspaces.find(workspace => workspace.id === bot.workspace.id);
-          return workspace ? [{ ...bot, busy: workspace.online && bot.busy, workspace: { ...workspace, online: workspace.online && !this.state.sourceErrors[workspace.id] } }] : [];
+          return workspace ? [{ ...bot, busy: workspace.online && bot.busy, workspace: { ...workspace, online: workspace.online } }] : [];
         });
         this.updateDirectory(workspaces, bots, Object.fromEntries(workspaces.map(workspace => [workspace.id, this.state.sections[workspace.id] ?? []])),
           Object.fromEntries(Object.entries(this.state.sourceErrors).filter(([id]) => workspaces.some(workspace => workspace.id === id))));
@@ -325,7 +340,6 @@ export class MobileController {
         if (current()) {
           this.update({ offline: true, error: errorMessage(error), bots: this.state.bots.map(bot => ({ ...bot, busy: false, workspace: { ...bot.workspace, online: false } })), workspaces: this.state.workspaces.map(workspace => ({ ...workspace, online: false })) });
           this.botFlights.clear();
-          for (const id of this.connections.keys()) this.evict(id);
         }
       }
     })();
@@ -371,9 +385,8 @@ export class MobileController {
         if (current()) { this.cacheAttachments(); this.openNotification(); void this.syncUnreadCounts(bots); }
       } catch (error) {
         if (current()) {
-          this.evict(workspace.id);
-          this.update({ sourceErrors: { ...this.state.sourceErrors, [workspace.id]: errorMessage(error) },
-            bots: this.state.bots.map(bot => bot.workspace.id === workspace.id ? { ...bot, busy: false, workspace: { ...bot.workspace, online: false } } : bot) });
+          this.evictClosed(workspace.id);
+          this.update({ sourceErrors: { ...this.state.sourceErrors, [workspace.id]: errorMessage(error) } });
         }
       }
     })();
@@ -460,7 +473,7 @@ export class MobileController {
         this.cacheAttachments();
         if (this.visible) void (await this.connection(bot.workspace)).request(`/api/${bot.conversationKind === "group" ? "groups" : "bots"}/${bot.id}/read`, { method: "POST", body: { threadId: bot.threadId } }).catch(() => {});
       } catch (error) {
-        if (epoch === this.epoch && syncEpoch === this.syncEpoch) this.evict(bot.workspace.id);
+        if (epoch === this.epoch && syncEpoch === this.syncEpoch) this.evictClosed(bot.workspace.id);
         if (epoch === this.epoch && historyEpoch === this.historyEpoch) this.update({ chatError: errorMessage(error) });
       } finally { if (epoch === this.epoch && historyEpoch === this.historyEpoch) this.update({ loadingMessages: false }); }
     })();
@@ -483,13 +496,14 @@ export class MobileController {
     try {
       for (const image of images) {
         if (image.path) continue;
-        const reply = z.object({ path: z.string().min(1), mime: z.string(), bytes: z.number() }).parse(await (await this.connection(bot.workspace)).request(`/api/attachments?uploadId=${image.id}`, { method: "POST", rawBody: new Uint8Array(await image.blob.arrayBuffer()), contentType: image.blob.type }));
+        const path = image.kind === "file" ? `/api/files?uploadId=${image.id}&name=${encodeURIComponent(image.name)}` : `/api/attachments?uploadId=${image.id}`;
+        const reply = z.object({ path: z.string().min(1), mime: z.string(), bytes: z.number() }).parse(await (await this.connection(bot.workspace)).request(path, { method: "POST", rawBody: new Uint8Array(await image.blob.arrayBuffer()), contentType: image.blob.type }));
         if (epoch !== this.epoch) return;
         image.path = reply.path;
       }
       if (!send) {
         const escape = (text: string) => text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-        const text = [value, ...images.map(image => `<attached-image path="${escape(image.path!)}" name="${escape(image.name)}" />`)].filter(Boolean).join("\n\n");
+        const text = [value, ...images.map(image => `<attached-${image.kind ?? "image"} path="${escape(image.path!)}" name="${escape(image.name)}" />`)].filter(Boolean).join("\n\n");
         send = { text, sendId: crypto.randomUUID(), fingerprint };
         this.sends.set(key, send);
       }
@@ -502,7 +516,7 @@ export class MobileController {
       if (historyEpoch === this.historyEpoch) await this.loadMessages(false);
       await this.refresh();
     } catch (error) {
-      if (epoch === this.epoch && syncEpoch === this.syncEpoch) this.evict(bot.workspace.id);
+      if (epoch === this.epoch && syncEpoch === this.syncEpoch) this.evictClosed(bot.workspace.id);
       if (epoch === this.epoch && historyEpoch === this.historyEpoch) this.update({ chatError: `${errorMessage(error)} 消息可能已送达，再次发送会沿用同一请求标识。` });
     } finally {
       if (epoch === this.epoch) {
@@ -513,17 +527,23 @@ export class MobileController {
     }
   }
   async pickImages(source: "camera" | "library"): Promise<void> {
+    return this.pickAttachments(source);
+  }
+  async pickDocuments(): Promise<void> { return this.pickAttachments("documents"); }
+  private async pickAttachments(source: "camera" | "library" | "documents"): Promise<void> {
     const bot = this.selectedBot();
     if (!bot || this.state.picking || this.activeSends.has(conversationKey(bot))) return;
     const epoch = this.epoch, key = conversationKey(bot);
     this.update({ picking: true, chatError: "" });
     try {
-      const picked = await this.platform.media.pickImages(source);
+      const picked = source === "documents" ? (await this.platform.media.pickDocuments()).map(documentFile) : await this.platform.media.pickImages(source);
       if (epoch !== this.epoch) return;
-      if ((this.state.images[key]?.length ?? 0) + picked.length > 8) throw new Error("每条消息最多添加 8 张图片。");
-      if (picked.some(image => image.blob.size > 10 * 1024 * 1024 || !image.blob.size)) throw new Error("每张图片需小于 10 MB，且不能为空。");
-      if (picked.some(image => !/^image\/(jpeg|png|gif|webp)$/.test(image.blob.type))) throw new Error("请选择 JPEG、PNG、GIF 或 WebP 图片。");
-      const images = picked.map(image => ({ ...image, id: crypto.randomUUID(), url: URL.createObjectURL(image.blob) }));
+      if ((this.state.images[key]?.length ?? 0) + picked.length > 8) throw new Error("每条消息最多添加 8 个附件。");
+      if (source !== "documents") {
+        if (picked.some(image => image.blob.size > 10 * 1024 * 1024 || !image.blob.size)) throw new Error("每张图片需小于 10 MB，且不能为空。");
+        if (picked.some(image => !/^image\/(jpeg|png|gif|webp)$/.test(image.blob.type))) throw new Error("请选择 JPEG、PNG、GIF 或 WebP 图片。");
+      }
+      const images = picked.map(image => ({ ...image, kind: source === "documents" ? "file" as const : "image" as const, id: crypto.randomUUID(), url: URL.createObjectURL(image.blob) }));
       this.update({ images: { ...this.state.images, [key]: [...(this.state.images[key] ?? []), ...images] } });
     } catch (error) { if (epoch === this.epoch && this.selectedBot() && conversationKey(this.selectedBot()!) === key) this.update({ chatError: errorMessage(error) }); }
     finally { if (epoch === this.epoch) this.update({ picking: false }); }
@@ -572,27 +592,37 @@ export class MobileController {
       const combined = transfer.signal;
       combined.throwIfAborted();
       if (remoteReference(path)) {
-        const response = await fetch(path, { credentials: "omit", referrerPolicy: "no-referrer", signal: AbortSignal.any([combined, AbortSignal.timeout(180_000)]) });
-        if (!response.ok) throw new Error("无法读取外部文件，请稍后重试。");
-        const chunks: Uint8Array[] = []; let size = 0;
-        const reader = response.body?.getReader();
-        if (Number(response.headers.get("content-length")) > MAX_FILE_BYTES) { await response.body?.cancel(); throw new Error("文件超过手机端 100 MB 的读取上限。"); }
-        if (reader) {
-          try {
-            while (true) {
-              const { done, value } = await reader.read(); if (done) break;
-              size += value.length;
-              if (size > MAX_FILE_BYTES) throw new Error("文件超过手机端 100 MB 的读取上限。");
-              chunks.push(value);
-            }
-          } finally { await reader.cancel().catch(() => {}); }
-        } else {
-          const data = new Uint8Array(await response.arrayBuffer());
-          if (data.length > MAX_FILE_BYTES) throw new Error("文件超过手机端 100 MB 的读取上限。");
-          chunks.push(data);
-        }
-        if (epoch !== this.epoch) throw new Error("账号已切换。");
-        return { data: new Uint8Array(await new Blob(chunks as BlobPart[]).arrayBuffer()), mime: response.headers.get("content-type") || "application/octet-stream", name: fileName(path) };
+        let idle: ReturnType<typeof setTimeout>;
+        const progress = () => {
+          clearTimeout(idle);
+          idle = setTimeout(() => transfer.abort(new Error("文件传输长时间没有进度，请重试。")), 180_000);
+        };
+        progress();
+        try {
+          const response = await fetch(path, { credentials: "omit", referrerPolicy: "no-referrer", signal: combined });
+          progress();
+          if (!response.ok) throw new Error("无法读取外部文件，请稍后重试。");
+          const chunks: Uint8Array[] = []; let size = 0;
+          const reader = response.body?.getReader();
+          if (Number(response.headers.get("content-length")) > MAX_FILE_BYTES) { await response.body?.cancel(); throw new Error("文件超过手机端 100 MB 的读取上限。"); }
+          if (reader) {
+            try {
+              while (true) {
+                const { done, value } = await reader.read(); if (done) break;
+                if (value.length) progress();
+                size += value.length;
+                if (size > MAX_FILE_BYTES) throw new Error("文件超过手机端 100 MB 的读取上限。");
+                chunks.push(value);
+              }
+            } finally { await reader.cancel().catch(() => {}); }
+          } else {
+            const data = new Uint8Array(await response.arrayBuffer());
+            if (data.length > MAX_FILE_BYTES) throw new Error("文件超过手机端 100 MB 的读取上限。");
+            chunks.push(data);
+          }
+          if (epoch !== this.epoch) throw new Error("账号已切换。");
+          return { data: new Uint8Array(await new Blob(chunks as BlobPart[]).arrayBuffer()), mime: response.headers.get("content-type") || "application/octet-stream", name: fileName(path) };
+        } finally { clearTimeout(idle!); }
       }
       const connection = await this.connection(bot.workspace);
       const reply = await connection.request<BinaryFile>(messageId ? `/api/threads/${bot.threadId}/messages/${messageId}/file` : path, { ...(messageId ? { method: "POST", body: { path } } : {}), responseType: "bytes", signal: combined });

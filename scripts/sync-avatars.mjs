@@ -11,6 +11,9 @@ for(const name of ['CursorAvatar.tsx','cursor-face-data.ts','mascot-motion.ts','
 }
 for(const name of ['mascot-bodies.ts','carved-bodies.ts','bot-avatar.ts']) await copyFile(`${desktop}/shared/${name}`,`${dest}/${name}`);
 let mascot=await readFile(`${desktop}/src/lib/mascot.ts`,'utf8');
+const expressionStart=mascot.indexOf('const LEGACY_STATES:'), expressionEnd=mascot.indexOf('export const PICKABLE_STATES');
+if(expressionStart<0 || expressionEnd<=expressionStart) throw new Error('Missing desktop expression contract');
+await writeFile(`${dest}/expression.ts`, `// Copyright OpenMausBot contributors. Apache-2.0; see third_party/OpenMausBot-LICENSE.\nimport { CURSOR_STATES, type CursorState } from './CursorAvatar';\nimport { mascotExpressionSchema } from './bot-avatar';\ntype MausState = CursorState;\n${mascot.slice(expressionStart,expressionEnd).replace('new Set<string>(MAUS_STATES)','new Set<string>(CURSOR_STATES)').replace('const LEGACY_STATES: LegacyStates','const LEGACY_STATES: Record<string, MausState>').trimEnd()}\n`);
 await writeFile(`${dest}/palette.ts`,`${mascot.slice(mascot.indexOf('export const MAUS_COLORS ='),mascot.indexOf('export const MAUS_COLOR_LABEL'))}\n${mascot.slice(mascot.indexOf('export const CHROME_GRADIENT'),mascot.indexOf('export function colorSwatch'))}\nexport type MausColor = keyof typeof MAUS_COLORS;\nexport type MausState = import('./CursorAvatar').CursorState;\nexport type MausMotion = "none" | "arrive" | "switch" | "customize" | "alert" | "thinking" | "working" | "launch" | "success" | "celebrate" | "blink" | "surprise" | "failure";\n`.replace('satisfies Record<MausColor, string>',''));
 await writeFile(`${dest}/labels.ts`,'export const mascotLabel = (value: string): string => value;\n');
 await mkdir(`${root}/public/mascot-steel`,{recursive:true});

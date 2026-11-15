@@ -190,3 +190,36 @@ Chromium 检查没有控制台错误。Playwright WebKit 在加载合成音视�
 - WebKit 的手机触摸模式验证负责人置顶、主协调红绿点、点按折叠、搜索恢复、设置点按返回，以及 320×568 深色无溢出、44px 点击区域和无焦点外框。证据：`output/playwright/departments-webkit-check.log`。截图包括 `departments-expanded.png`、`departments-unread-63.png`、`departments-narrow-dark.png`、`departments-webkit-dark.png`，均在 `output/playwright/`。
 
 此轮只修改手机项目，需重新打包安装手机 App。未安装到用户真机，未修改桌面原版服务或部署线上服务。
+
+## 桌面与 Cloud Bot 表情协议一致性（2026-11-15）
+
+桌面与 Cloud 的同一运行服务在 Bot 列表中发送 `mascotExpression` 状态名称（例如 `proud`、`happy`、`focused`），也可能发送 null 或省略。手机此前仅允许数字，导致带命名表情的列表整体校验失败，显示“收到的数据暂不兼容”。此修复不把该提示当作网络故障证据，也不推断生产 Cloud 使用了哪一版镜像。
+
+手机从 DoneBot 的 `shared/bot-avatar.ts` 同步表情校验约定，并从桌面 `src/lib/mascot.ts` 同步 `normalizeState` 及旧名称映射；两种头像都使用同一状态映射。已有数字缓存保留读取兼容性。`node scripts/sync-avatars.mjs` 或 `pnpm sync:desktop` 可重复生成共享文件。
+
+检查命令（隔离检查需同级 DoneBot 源码和依赖）：
+
+```sh
+pnpm test
+node --experimental-strip-types scripts/verify-desktop-contract.ts
+pnpm ios:sync
+```
+
+82 项手机测试通过，覆盖完整目录解析、表情名称与旧名称、缓存恢复，以及模拟手机同时读取电脑和 Cloud 时保持在线。真实隔离 DoneBot 运行服务通过原版 HTTP 路由保存四种表情，再用生产手机校验器读取 `/api/bots?messages=20`，所有 Bot 均保留，表情映射正确。证据位于临时目录 `donebot-mobile-contract-QSn31t/receipt.json`，服务日志由脚本输出。生产构建和 Capacitor iOS 资源同步通过；未操作用户账号、部署实例或物理手机，真机需安装更新后的 App。
+
+
+## 大文件持续传输与附件交互（2026-11-16）
+
+生产中继协议的隔离测试覆盖持续 250 秒视频下载与并发 Bot 查询，传输有进度不超时；
+连续 180 秒没有文件进度仅取消该请求，加密连接继续可用，30 秒完全静默的链路仍检测断开。
+公网 URL 下载也使用 180 秒无进度超时，合成流持续 300 秒可完整结束；停滞不退出账号或关闭工作空间。
+文件仍遵守 100 MB 上限，退出账号会取消进行中的传输，切换页面不会中止共享下载。
+
+`pnpm test` 共 12 文件 90 项通过，`pnpm build`、Capacitor 同步、iOS 模拟器及真机目标编译通过。
+通过独立 `MOBILE_FIXTURE_PORT=5190 pnpm dev:fixture` 与真实 Chromium 输入，验证相机／图库／本地
+PDF 文件入口、发送和原会话回执、视频 480×270／1 秒解码、全屏黑底及三个操作图标、电脑／Cloud
+切换、左边缘右滑返回列表及纵向滚动不误返回。390×844 与 320×568 深色无横向溢出，菜单按钮
+高度 44px，输入与发送控件均在视口内。截图保留在 `output/playwright/*20261116.png`。
+
+浏览器相机测试使用文件选择器注入合成照片；未实际拍摄。真机系统文件、保存／分享目标和相机硬件、
+公网慢速连接、后台 APNs 送达仍需设备验证。本次没有操作用户的线上设备或部署生产实例。

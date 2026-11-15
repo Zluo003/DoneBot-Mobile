@@ -5,10 +5,11 @@ export type Size = { width: number; height: number };
 export type ImageTransform = Point & { scale: number };
 export const originalImage: ImageTransform = { x: 0, y: 0, scale: 1 };
 
-export function swipeDirection(start: Point, end: Point, elapsed: number): "left" | "down" | undefined {
+export function swipeDirection(start: Point, end: Point, elapsed: number): "left" | "right" | "down" | undefined {
   if (elapsed > 1000) return;
   const x = end.x - start.x, y = end.y - start.y;
   if (x <= -72 && -x > Math.abs(y) * 1.5) return "left";
+  if (start.x <= 28 && x >= 72 && x > Math.abs(y) * 1.5) return "right";
   if (y >= 80 && y > Math.abs(x) * 1.5) return "down";
 }
 
@@ -66,7 +67,7 @@ export function useSwipeNavigation(ref: RefObject<HTMLElement | null>, back: () 
       if (touch.identifier !== gesture.id) return cancel();
       const x = touch.clientX - gesture.start.x, y = touch.clientY - gesture.start.y;
       if (Math.abs(y) > 12 && Math.abs(y) > Math.abs(x) * 1.5) gesture.vertical = true;
-      if ((!gesture.vertical && x < -12 && -x > Math.abs(y) * 1.5) || (gesture.down && y > 12 && y > Math.abs(x) * 1.5)) {
+      if ((!gesture.vertical && ((x < -12 && -x > Math.abs(y) * 1.5) || (gesture.start.x <= 28 && x > 12 && x > Math.abs(y) * 1.5))) || (gesture.down && y > 12 && y > Math.abs(x) * 1.5)) {
         if (event.cancelable) event.preventDefault();
       }
     };
@@ -77,7 +78,7 @@ export function useSwipeNavigation(ref: RefObject<HTMLElement | null>, back: () 
       const touch = Array.from(event.changedTouches).find(touch => touch.identifier === current.id);
       if (!touch) return;
       const direction = swipeDirection(current.start, { x: touch.clientX, y: touch.clientY }, performance.now() - current.time);
-      if ((direction === "left" && !current.vertical) || (direction === "down" && current.down)) {
+      if (((direction === "left" || direction === "right") && !current.vertical) || (direction === "down" && current.down)) {
         if (event.cancelable) event.preventDefault();
         callback.current();
       }
