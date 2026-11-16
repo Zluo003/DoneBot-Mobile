@@ -63,7 +63,8 @@ const defaultBotSchema = z.union([
 ]);
 const taskSchema = z.object({
   threadId: idSchema, unread: z.boolean().optional(), lastReadMessageId: idSchema.optional(),
-  updatedAt: z.number().optional(),
+  title: z.string().optional(), createdAt: z.number().optional(), updatedAt: z.number().optional(),
+  archivedAt: z.number().optional(), routineRunId: z.string().optional(), busy: z.boolean().optional(),
 });
 export const botSchema = z.object({
   id: idSchema, name: z.string(), threadId: idSchema,

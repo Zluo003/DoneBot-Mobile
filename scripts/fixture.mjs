@@ -64,6 +64,19 @@ if (process.env.MOBILE_ATTENTION_FIXTURE === "1") {
   histories.set("thread-writer", Array.from({ length: 65 }, (_, i) => ({ id: `writer-${i}`, role: "bot", kind: "text", text: `合成未读消息 ${i}`, timestamp: at(65 - i) })));
   histories.set("thread-cloud-writer", [{ id: "cloud-1", role: "bot", kind: "text", text: "Cloud 合成消息", timestamp: at(1) }]);
 }
+if (process.env.MOBILE_CONVERSATIONS_FIXTURE === "1") {
+  histories.set("thread-plan", [{ id: "plan-reply", role: "bot", kind: "text", text: "视频方案已整理，接着确认参考素材。", timestamp: at(2) }]);
+  histories.set("thread-archived", [{ id: "archive-reply", role: "bot", kind: "text", text: "归档后的较新回复不改变默认对话。", timestamp: at(0) }]);
+  bots[0].unread = true;
+  bots[0].tasks = [
+    { threadId: "thread-duobao", title: "日常工作", unread: true },
+    { threadId: "thread-plan", title: "视频方案", unread: false },
+    { threadId: "thread-archived", title: "已完成的工作", archivedAt: Date.now(), unread: false },
+  ];
+  histories.set("thread-cloud-plan", [{ id: "cloud-plan-reply", role: "bot", kind: "text", text: "Cloud 对话列表已准备好。", timestamp: at(0) }]);
+  bots[2].tasks = [{ threadId: "thread-ahe", title: "资料归档", unread: true }, { threadId: "thread-cloud-plan", title: "新的研究", unread: false }];
+}
+const wireTasks = bot => bot.tasks?.map(task => ({ ...task, updatedAt: Math.max(0, ...(histories.get(task.threadId) ?? []).map(message => new Date(message.timestamp).getTime())) }));
 const messagePage = (threadId, limit, before) => {
   const all = histories.get(threadId) ?? [];
   const end = before ? all.findIndex(message => message.id === before) : all.length;
@@ -99,7 +112,7 @@ const rpc = http.createServer(async (req, res) => {
       return json(res, 200, { [toggle[1] === "routines" ? "routine" : toggle[1] === "webhooks" ? "webhook" : "trigger"]: item });
     }
     if (req.method === "GET" && url.pathname === "/api/bots") return json(res, 200, {
-      bots: bots.filter(bot => !workspace || bot.workspaceId === workspace).map(bot => ({ ...bot, ...messagePage(bot.threadId, Number(url.searchParams.get("messages") || 1)) })),
+      bots: bots.filter(bot => !workspace || bot.workspaceId === workspace).map(bot => ({ ...bot, tasks: wireTasks(bot), ...messagePage(bot.threadId, Number(url.searchParams.get("messages") || 1)) })),
       sections: workspace === "cloud" && process.env.MOBILE_ATTENTION_FIXTURE !== "1" ? [] : ["内容与创作"],
       groups: groups.filter(group => !workspace || group.workspaceId === workspace).map(group => ({ ...group, ...messagePage(group.threadId, Number(url.searchParams.get("messages") || 1)) })),
     });
@@ -131,17 +144,25 @@ const rpc = http.createServer(async (req, res) => {
       const body = await read(req);
       const bot = (target[1] === "groups" ? groups : bots).find(bot => bot.id === target[2]);
       if (!bot) return json(res, 404, {});
-      if (target[3] === "read") { bot.unread = false; bot.lastReadMessageId = histories.get(bot.threadId)?.at(-1)?.id; return json(res, 200, { ok: true }); }
-      if (!body.text || !body.sendId || body.threadId !== bot.threadId) return json(res, 400, {});
-      if (received.has(body.sendId)) return json(res, 200, { threadId: bot.threadId });
+      const threadId = body.threadId ?? bot.threadId, task = bot.tasks?.find(task => task.threadId === threadId);
+      if (threadId !== bot.threadId && !task) return json(res, 404, {});
+      if (target[3] === "read") {
+        if (task) { task.unread = false; task.lastReadMessageId = histories.get(threadId)?.at(-1)?.id; }
+        bot.unread = bot.tasks?.some(task => task.unread) ?? false;
+        if (threadId === bot.threadId) bot.lastReadMessageId = histories.get(threadId)?.at(-1)?.id;
+        return json(res, 200, { ok: true });
+      }
+      if (!body.text || !body.sendId) return json(res, 400, {});
+      if (received.has(body.sendId)) return json(res, 200, { threadId });
       received.add(body.sendId);
       const message = { id: crypto.randomUUID(), role: "user", kind: "text", text: body.text, sendId: body.sendId, timestamp: new Date().toISOString() };
-      histories.get(bot.threadId).push(message); bot.busy = true; bot.working = true;
+      histories.get(threadId).push(message); bot.busy = true; bot.working = true;
       setTimeout(() => {
-        histories.get(bot.threadId).push({ id: crypto.randomUUID(), role: "bot", kind: "text", text: `收到：${body.text}\n\n这条回复来自隔离验证服务。消息已通过与桌面端兼容的加密通道往返。`, timestamp: new Date().toISOString() });
+        histories.get(threadId).push({ id: crypto.randomUUID(), role: "bot", kind: "text", text: `收到：${body.text}\n\n这条回复来自隔离验证服务。消息已通过与桌面端兼容的加密通道往返。`, timestamp: new Date().toISOString() });
+        if (task) task.unread = true;
         bot.busy = false; bot.working = false; bot.unread = true;
       }, 650).unref();
-      return json(res, 200, { threadId: bot.threadId, message });
+      return json(res, 200, { threadId, message });
     }
     json(res, 404, {});
   } catch { json(res, 400, {}); }
@@ -222,6 +243,6 @@ server.listen(0, "127.0.0.1"); await once(server, "listening"); port = server.ad
 process.env.MOBILE_FIXTURE_ORIGIN = `http://127.0.0.1:${port}`;
 const vite = await createServer({ mode: "fixture", server: { port: webPort, strictPort: true } });
 await vite.listen();
-console.log(JSON.stringify({ url: `http://127.0.0.1:${webPort}`, api: process.env.MOBILE_FIXTURE_ORIGIN, account: account.email, password: "donebot-preview", isolated: true, desktopFixture: desktopFixture?.origin }));
+console.log(JSON.stringify({ url: `http://127.0.0.1:${webPort}`, api: process.env.MOBILE_FIXTURE_ORIGIN, rpc: `http://127.0.0.1:${rpc.address().port}`, account: account.email, password: "donebot-preview", isolated: true, desktopFixture: desktopFixture?.origin }));
 const close = async () => { for (const socket of wss.clients) socket.terminate(); await vite.close(); server.close(); rpc.close(); process.exit(0); };
 process.on("SIGINT", close); process.on("SIGTERM", close);

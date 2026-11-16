@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { attentionVersion, readThread, UnreadMessages, unreadThreads } from "./attention";
+import { conversationList, conversationTasks, conversationVersion, lastReply, latestConversation } from "./conversations";
 import { automationKey, automationPath, automationSchema, connectedAppsSchema, readAutomations, type Automation, type ConnectedApp } from "./automations";
 import { fileName, messageFiles, mediaKind, remoteReference } from "./media";
 import { documentFile } from "./documents";
@@ -14,6 +15,7 @@ export interface State {
   session: Session | null; bots: Bot[]; workspaces: Workspace[]; sections: Record<string, string[]>;
   selected: string | null; selectedThread: string | null; messages: Message[]; hasMore: boolean;
   loading: boolean; loadingMessages: boolean; sending: boolean;
+  openingBot: string | null; conversationSync: Record<string, { loading: boolean; error: string }>;
   error: string; chatError: string; sourceErrors: Record<string, string>;
   challenge: string | null; push: "off" | "on" | "busy" | "unavailable";
   pushError: string; images: Record<string, DraftImage[]>; picking: boolean; drafts: Record<string, string>;
@@ -21,7 +23,7 @@ export interface State {
   automations: Record<string, Automation[]>; apps: Record<string, ConnectedApp[]>;
   workspaceLoading: Record<string, boolean>; workspaceErrors: Record<string, string>; automationBusy: string[];
 }
-const initial = (): State => ({ phase: "boot", session: null, bots: [], workspaces: [], sections: {}, selected: null, selectedThread: null, messages: [], hasMore: false, loading: false, loadingMessages: false, sending: false, error: "", chatError: "", sourceErrors: {}, challenge: null, push: "off", pushError: "", images: {}, picking: false, drafts: {}, offline: false, cacheError: "", cachePending: 0, automations: {}, apps: {}, workspaceLoading: {}, workspaceErrors: {}, automationBusy: [] });
+const initial = (): State => ({ phase: "boot", session: null, bots: [], workspaces: [], sections: {}, selected: null, selectedThread: null, messages: [], hasMore: false, loading: false, loadingMessages: false, sending: false, openingBot: null, conversationSync: {}, error: "", chatError: "", sourceErrors: {}, challenge: null, push: "off", pushError: "", images: {}, picking: false, drafts: {}, offline: false, cacheError: "", cachePending: 0, automations: {}, apps: {}, workspaceLoading: {}, workspaceErrors: {}, automationBusy: [] });
 const conversationKey = (bot: Bot) => `${botKey(bot)}/${bot.threadId}`;
 
 export class MobileController {
@@ -31,6 +33,8 @@ export class MobileController {
   private historyEpoch = 0;
   private connections = new Map<string, Promise<WorkspaceConnection>>();
   private cachedMessages = new Map<string, { messages: Message[]; hasMore: boolean }>();
+  private conversationChecks = new Map<string, { version: string; at: number }>();
+  private conversationFlights = new Map<string, Promise<void>>();
   private sends = new Map<string, { text: string; sendId: string; fingerprint: string }>();
   private transfers = new Set<AbortController>();
   private activeSends = new Set<string>();
@@ -126,12 +130,19 @@ export class MobileController {
     const bot = this.state.bots.find(bot => botKey(bot) === this.state.selected);
     return bot ? { ...bot, threadId: this.state.selectedThread ?? bot.threadId } : undefined;
   }
+  conversations(bot: Bot) {
+    const source = this.state.bots.find(item => botKey(item) === botKey(bot)) ?? bot;
+    return conversationList(source, threadId => this.cachedMessages.get(conversationKey({ ...source, threadId })));
+  }
+  latestConversation(bot: Bot) { return latestConversation(this.conversations(bot), bot.threadId); }
 
   private resetConnections(): void {
     ++this.syncEpoch; ++this.historyEpoch;
     this.refreshFlight = undefined; this.historyFlight = undefined; this.presenceFlight = undefined;
     this.botFlights.clear();
     this.attentionFlights.clear();
+    this.conversationFlights.clear();
+    this.update({ openingBot: null, conversationSync: {} });
     for (const id of this.connections.keys()) this.evict(id);
   }
   private syncActive(): void {
@@ -263,7 +274,7 @@ export class MobileController {
     ++this.epoch;
     this.clearMedia();
     this.resetConnections();
-    this.cachedMessages.clear(); this.unreadMessages.clear(); this.attentionCountedAt.clear(); this.sends.clear(); this.activeSends.clear();
+    this.cachedMessages.clear(); this.conversationChecks.clear(); this.unreadMessages.clear(); this.attentionCountedAt.clear(); this.sends.clear(); this.activeSends.clear();
     this.workspaceFlights.clear(); this.workspaceVersions.clear();
     this.state = { ...initial(), loading: this.state.loading, push: this.platform.kind === "web" ? "unavailable" : "off" };
     this.presenceAt = 0; this.pushRestoredAt = 0;
@@ -350,7 +361,7 @@ export class MobileController {
   private updateDirectory(workspaces: Workspace[], bots: Bot[], sections: State["sections"], sourceErrors: State["sourceErrors"]): void {
     const lostSelection = this.state.selected && !bots.some(bot => botKey(bot) === this.state.selected);
     if (lostSelection) { ++this.historyEpoch; this.historyFlight = undefined; }
-    for (const key of this.cachedMessages.keys()) if (!bots.some(bot => key.startsWith(`${botKey(bot)}/`))) this.cachedMessages.delete(key);
+    for (const key of this.cachedMessages.keys()) if (!bots.some(bot => key.startsWith(`${botKey(bot)}/`))) { this.cachedMessages.delete(key); this.conversationChecks.delete(key); }
     for (const bot of bots) if (bot.messages.length) {
       const key = conversationKey(bot);
       this.cachedMessages.set(key, mergeMessagePage(this.cachedMessages.get(key), { messages: bot.messages, hasMore: bot.hasMore ?? true }));
@@ -382,7 +393,7 @@ export class MobileController {
         this.updateDirectory(this.state.workspaces, [...this.state.bots.filter(bot => bot.workspace.id !== workspace.id), ...bots],
           { ...this.state.sections, [workspace.id]: reply.sections }, sourceErrors);
         await this.persistCache();
-        if (current()) { this.cacheAttachments(); this.openNotification(); void this.syncUnreadCounts(bots); }
+        if (current()) { this.cacheAttachments(); this.openNotification(); void this.syncUnreadCounts(bots); void this.syncConversations(bots); }
       } catch (error) {
         if (current()) {
           this.evictClosed(workspace.id);
@@ -435,15 +446,78 @@ export class MobileController {
     if (epoch !== this.epoch || syncEpoch !== this.syncEpoch || this.state.offline) return;
     await Promise.all(this.state.workspaces.filter(workspace => workspace.online && (!workspaceId || workspace.id === workspaceId)).map(workspace => this.refreshBots(workspace)));
   }
-  async select(bot: Bot, threadId = bot.threadId): Promise<void> {
-    ++this.historyEpoch;
+  async syncConversations(bots: Bot[], force = false): Promise<void> {
+    const pending = [...bots], epoch = this.epoch, syncEpoch = this.syncEpoch;
+    const current = () => epoch === this.epoch && syncEpoch === this.syncEpoch && this.visible && !this.state.offline;
+    const worker = async () => {
+      for (let item = pending.shift(); item; item = pending.shift()) {
+        const requestedKey = botKey(item), bot = this.state.bots.find(bot => botKey(bot) === requestedKey);
+        if (!bot) continue;
+        const key = botKey(bot), previous = this.conversationFlights.get(key);
+        if (previous) { await previous; continue; }
+        if (!current() || !bot.workspace.online) continue;
+        const tasks = conversationTasks(bot);
+        this.update({ conversationSync: { ...this.state.conversationSync, [key]: { loading: true, error: "" } } });
+        const flight = (async () => {
+          const errors: string[] = [];
+          try {
+            for (const task of tasks) {
+              if (!current() || !this.state.bots.some(item => botKey(item) === key)) return;
+              try {
+                const conversation = conversationKey({ ...bot, threadId: task.threadId });
+                const version = conversationVersion(bot, task.threadId);
+                const valid = () => current() && this.state.bots.some(item => botKey(item) === key && item.workspace.online
+                  && conversationTasks(item).some(candidate => candidate.threadId === task.threadId) && conversationVersion(item, task.threadId) === version);
+                const checked = this.conversationChecks.get(conversation);
+                if (!force && checked?.version === version && (task.updatedAt !== undefined || Date.now() - checked.at < 30_000)) continue;
+                let page = task.threadId === bot.threadId && bot.hasMore !== undefined
+                  ? { messages: bot.messages, hasMore: bot.hasMore } : undefined;
+                const connection = await this.connection(bot.workspace);
+                let before: string | undefined;
+                const visited = new Set<string>();
+                while (valid()) {
+                  page ??= messagePageSchema.parse(await connection.request(`/api/threads/${task.threadId}/messages?limit=50${before ? `&before=${encodeURIComponent(before)}` : ""}`));
+                  if (!valid()) break;
+                  this.cachedMessages.set(conversation, mergeMessagePage(this.cachedMessages.get(conversation), page, Boolean(before)));
+                  if (lastReply(page.messages) || !page.hasMore) break;
+                  const next = page.messages[0]?.id;
+                  if (!next || visited.has(next)) throw new Error("对话记录尚未完整同步，请重试。");
+                  visited.add(next); before = next; page = undefined;
+                }
+                if (valid()) this.conversationChecks.set(conversation, { version, at: Date.now() });
+              } catch (error) { errors.push(errorMessage(error)); }
+            }
+            if (current()) await this.persistCache();
+          } finally {
+            if (current()) this.update({ conversationSync: { ...this.state.conversationSync, [key]: { loading: false, error: errors.length ? `部分对话尚未同步：${errors[0]}` : "" } } });
+          }
+        })();
+        this.conversationFlights.set(key, flight);
+        await flight;
+        if (this.conversationFlights.get(key) === flight) this.conversationFlights.delete(key);
+      }
+    };
+    await Promise.all([worker(), worker()]);
+  }
+  async select(bot: Bot, threadId?: string): Promise<void> {
+    const historyEpoch = ++this.historyEpoch, epoch = this.epoch, key = botKey(bot);
     this.historyFlight = undefined;
-    const key = botKey(bot), conversation = conversationKey({ ...bot, threadId });
+    if (threadId === undefined) {
+      this.update({ openingBot: key });
+      await this.syncConversations([this.state.bots.find(item => botKey(item) === key) ?? bot]);
+      if (epoch !== this.epoch || historyEpoch !== this.historyEpoch) return;
+      const latest = this.state.bots.find(item => botKey(item) === key);
+      if (!latest) { this.update({ openingBot: null }); return; }
+      bot = latest;
+      threadId = this.latestConversation(bot)?.threadId ?? bot.threadId;
+    }
+    if (!conversationTasks(bot).some(task => task.threadId === threadId)) return;
+    const conversation = conversationKey({ ...bot, threadId });
     const cached = this.cachedMessages.get(conversation);
-    this.update({ selected: key, selectedThread: threadId, messages: cached?.messages ?? [], hasMore: cached?.hasMore ?? false, sending: this.activeSends.has(conversation), chatError: "", bots: this.state.bots.map(item => botKey(item) === key ? readThread(item, threadId) : item) });
+    this.update({ openingBot: null, selected: key, selectedThread: threadId, messages: cached?.messages ?? [], hasMore: cached?.hasMore ?? false, sending: this.activeSends.has(conversation), chatError: "", bots: this.state.bots.map(item => botKey(item) === key ? readThread(item, threadId!) : item) });
     await this.loadMessages(false);
   }
-  back(): void { ++this.historyEpoch; this.historyFlight = undefined; this.update({ selected: null, selectedThread: null, messages: [], chatError: "", sending: false, loadingMessages: false }); }
+  back(): void { ++this.historyEpoch; this.historyFlight = undefined; this.update({ openingBot: null, selected: null, selectedThread: null, messages: [], chatError: "", sending: false, loadingMessages: false }); }
   setDraft(value: string): void {
     const bot = this.selectedBot(), key = bot ? conversationKey(bot) : null;
     if (key) this.update({ drafts: { ...this.state.drafts, [key]: value } });
@@ -467,7 +541,7 @@ export class MobileController {
         if (epoch !== this.epoch || historyEpoch !== this.historyEpoch) return;
         const merged = mergeMessagePage(this.cachedMessages.get(key), page, older);
         this.cachedMessages.set(key, merged);
-        this.update({ messages: merged.messages, hasMore: merged.hasMore, chatError: "" });
+        this.update({ messages: merged.messages, hasMore: merged.hasMore, chatError: "", bots: this.visible ? this.state.bots.map(item => botKey(item) === botKey(bot) ? readThread(item, bot.threadId) : item) : this.state.bots });
         await this.persistCache();
         if (epoch !== this.epoch) return;
         this.cacheAttachments();
@@ -703,7 +777,7 @@ export class MobileController {
     this.state = initial(); this.update({ loading: true });
     this.resetConnections();
     this.workspaceFlights.clear(); this.workspaceVersions.clear();
-    this.cachedMessages.clear(); this.unreadMessages.clear(); this.attentionCountedAt.clear(); this.sends.clear(); this.activeSends.clear(); this.route = null;
+    this.cachedMessages.clear(); this.conversationChecks.clear(); this.unreadMessages.clear(); this.attentionCountedAt.clear(); this.sends.clear(); this.activeSends.clear(); this.route = null;
     const clearing = cache?.close(true).then(() => "", () => "登录已退出，但本机缓存未能完全清除，请检查手机存储后重试。") ?? Promise.resolve("");
     await this.pushFlight;
     if (this.platform.kind !== "web") {

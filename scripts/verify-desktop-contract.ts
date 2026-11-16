@@ -14,7 +14,7 @@ const api = async (method: string, path: string, body?: unknown) => {
   return response.json();
 };
 try {
-  const { directorySchema } = await vite.ssrLoadModule("/src/core/contracts.ts");
+  const { directorySchema, messagePageSchema } = await vite.ssrLoadModule("/src/core/contracts.ts");
   const { avatarState } = await vite.ssrLoadModule("/src/ui/avatar-state.ts");
   const bots = (await api("GET", "/api/bots")).bots;
   const target = bots[0];
@@ -41,6 +41,31 @@ try {
     if (expression) assert.equal(avatarState(bot), expression === "focused" ? "working" : expression);
     checks.push(`real isolated runtime directory accepted with expression ${expression}`);
   }
+  const { conversationList, latestConversation } = await vite.ssrLoadModule("/src/core/conversations.ts");
+  const originalThread = target.threadId;
+  const { task } = await api("POST", `/api/bots/${target.id}/tasks`, { title: "手机切换验证", select: false });
+  const routed = await api("POST", `/api/bots/${target.id}/messages`, { threadId: task.threadId, text: "Mobile conversation switch fixture.", sendId: crypto.randomUUID() });
+  assert.equal(routed.threadId, task.threadId);
+  let history;
+  const until = Date.now() + 30_000;
+  do {
+    history = messagePageSchema.parse(await api("GET", `/api/threads/${task.threadId}/messages?limit=50`));
+    if (history.messages.some((message: { role: string; kind: string }) => message.role === "bot" && message.kind === "text")) break;
+    await new Promise(resolve => setTimeout(resolve, 200));
+  } while (Date.now() < until);
+  assert.ok(history.messages.some((message: { role: string; kind: string }) => message.role === "bot" && message.kind === "text"), "fake engine replied in the explicit alternate conversation");
+  const wire = directorySchema.parse(await api("GET", "/api/bots?messages=20"));
+  const bot = wire.bots.find((bot: { id: string }) => bot.id === target.id);
+  assert.equal(bot.threadId, originalThread, "phone-style send does not select a desktop conversation");
+  const alternate = bot.tasks.find((item: { threadId: string }) => item.threadId === task.threadId);
+  assert.equal(typeof alternate.title, "string"); assert.equal(typeof alternate.updatedAt, "number");
+  const list = conversationList(bot, (threadId: string) => threadId === task.threadId ? history : { messages: bot.messages, hasMore: bot.hasMore });
+  assert.equal(latestConversation(list, originalThread).threadId, task.threadId);
+  await api("POST", `/api/bots/${target.id}/read`, { threadId: task.threadId });
+  const read = directorySchema.parse(await api("GET", "/api/bots?messages=20")).bots.find((bot: { id: string }) => bot.id === target.id);
+  assert.equal(read.tasks.find((item: { threadId: string }) => item.threadId === task.threadId).unread, false);
+  assert.equal(read.threadId, originalThread);
+  checks.push("Real shared desktop/Cloud task metadata, explicit alternate-thread send/reply/read, latest-reply default, and independent desktop selection");
   const receipt = { passed: true, checks, url: fixture.info.url, log: fixture.info.logPath, liveDataTouched: false,
     limitations: "Uses the real desktop/Cloud shared HTTP handler and Mobile parser against a disposable local fake-engine runtime. Does not inspect the user's deployed Cloud image or physical phone." };
   await writeFile(join(output, "receipt.json"), JSON.stringify(receipt, null, 2));

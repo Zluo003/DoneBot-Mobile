@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
-import { ArrowLeft, ArrowUp, Bell, CalendarClock, Camera, FileText, FolderOpen, ImagePlus, Link, List, Menu, Paperclip, ChevronRight, Crown, Users, Cloud, Eye, EyeOff, LoaderCircle, LogOut, MessageSquare, Monitor, RefreshCw, Search, ShieldCheck, WifiOff, X } from "lucide-react";
+import { ArrowLeft, ArrowUp, Bell, CalendarClock, Camera, Check, FileText, FolderOpen, ImagePlus, Link, List, Menu, MessagesSquare, Paperclip, ChevronRight, Crown, Users, Cloud, Eye, EyeOff, LoaderCircle, LogOut, MessageSquare, Monitor, RefreshCw, Search, ShieldCheck, WifiOff, X } from "lucide-react";
+import type { Conversation } from "../core/conversations";
 import { messageContent } from "../core/media";
 import { Avatar } from "./Avatar";
 import { viewersDefaultBot } from "../desktop/default-bot";
@@ -81,7 +82,6 @@ function ConversationAvatar({ bot, state, controller, size = 46 }: { bot: Bot; s
   const members = (bot.memberIds ?? []).map(id => state.bots.find(member => member.workspace.id === bot.workspace.id && member.id === id && member.conversationKind !== "group")).filter((member): member is Bot => Boolean(member)).slice(0, 2);
   return <span className="group-avatar" style={{ width: size, height: size }} aria-hidden="true">{members.length ? members.map(member => <Avatar key={member.id} bot={member} controller={controller} size={size * .7} />) : <Users size={size * .7} />}</span>;
 }
-const lastReply = (bot: Bot) => [...bot.messages].reverse().find(message => message.role === "bot" && message.kind === "text");
 function BotList({ controller, state, onMenu, source, onWorkspace, density }: { controller: MobileController; state: State; onMenu(): void; source?: Workspace; onWorkspace(id: string): void; density: ListDensity }) {
   const [search, setSearch] = useState("");
   const listId = useId();
@@ -111,10 +111,11 @@ function BotList({ controller, state, onMenu, source, onWorkspace, density }: { 
     {source && !online && <div className="directory-status" role="status"><WifiOff size={14} /><span>{state.offline ? "离线模式 · 可查看已缓存内容" : "未连接 · 显示已同步内容"}</span></div>}
     <label className="search-field"><Search size={17} aria-hidden /><input aria-label="搜索 Bot" placeholder="搜索 Bot 或群聊" value={search} onChange={event => setSearch(event.target.value)} />{search && <button aria-label="清除搜索" onClick={() => setSearch("")}><X size={15} /></button>}</label>
     <div className="bot-list-scroll">
+      {state.openingBot && <p className="conversation-loading" role="status"><Spinner />正在同步对话…<button onClick={() => controller.back()}>取消</button></p>}
       {state.error && <div className="source-error" role="alert"><WifiOff size={18} /><div>{state.error}<button onClick={() => void refresh()}>重新连接</button></div></div>}
       {source && state.sourceErrors[source.id] && <p className="workspace-error">{state.sourceErrors[source.id]}</p>}
       {chief && (!search || filtered.includes(chief)) && <button className="coordinator" onClick={() => void controller.select(chief)} aria-label={`打开 ${chief.name} 的会话`} aria-current={state.selected === botKey(chief) ? "page" : undefined}>
-        <span className="coordinator-avatar"><Avatar controller={controller} bot={chief} size={60} /><Crown size={16} className="coordinator-crown" />{chief.unread && <i className="coordinator-unread" role="img" aria-label="有未读消息" />}{chief.busy && <i className="busy-dot" role="img" aria-label="正在工作" />}</span><strong>{chief.name}</strong><span>主协调 Bot</span><p>{chief.busy ? "正在处理任务…" : lastReply(chief) ? preview(lastReply(chief)) : "暂无回复"}</p>
+        <span className="coordinator-avatar"><Avatar controller={controller} bot={chief} size={60} /><Crown size={16} className="coordinator-crown" />{chief.unread && <i className="coordinator-unread" role="img" aria-label="有未读消息" />}{chief.busy && <i className="busy-dot" role="img" aria-label="正在工作" />}</span><strong>{chief.name}</strong><span>主协调 Bot</span><p>{chief.busy ? "正在处理任务…" : controller.latestConversation(chief)?.reply ? preview(controller.latestConversation(chief)?.reply) : "暂无回复"}</p>
       </button>}
       {sections.map((section, index) => {
         const entries = filtered.filter(bot => bot !== chief && (bot.section ?? "") === section)
@@ -127,7 +128,7 @@ function BotList({ controller, state, onMenu, source, onWorkspace, density }: { 
         const unreadCount = unread.reduce((count, bot) => count + (bot.unreadCount ?? 0), 0);
         const membersId = `${listId}-department-${index}`;
         return <section className="directory-section" key={section} aria-label={section || "Bot 与群聊"}>{section && <h2 className="department-heading"><button type="button" className="department-toggle" aria-expanded={!folded} aria-controls={membersId} onClick={() => toggleDepartment(key)}><ChevronRight size={15} className={folded ? "" : "expanded"} aria-hidden /><span>{section}</span><i aria-hidden />{folded && unread.length > 0 && <span className="department-unread" aria-label={counting ? "正在同步未读消息数量" : `${unreadCount} 条未读消息`}>{counting ? "…" : unreadCount}</span>}</button></h2>}<div id={membersId} hidden={folded}>{entries.map(bot => {
-          const reply = lastReply(bot);
+          const reply = controller.latestConversation(bot)?.reply;
           return <button className={`bot-row ${state.selected === botKey(bot) ? "selected" : ""}`} key={botKey(bot)} onClick={() => void controller.select(bot)} aria-label={`打开 ${bot.name} 的会话`} aria-current={state.selected === botKey(bot) ? "page" : undefined}>
             <span className="avatar-wrap"><ConversationAvatar bot={bot} state={state} controller={controller} size={density === "compact" ? 38 : density === "comfortable" ? 52 : 46} />{bot.chiefOfStaff && <Crown className="row-crown" size={13} />}{bot.busy && <span className="busy-dot" role="img" aria-label="正在工作" />}</span>
             <span className="bot-row-content"><span className="bot-row-heading"><strong>{bot.name}</strong><time>{clock(reply?.timestamp)}</time></span><span className="bot-preview"><span>{bot.busy ? "正在处理任务…" : reply ? preview(reply) : "暂无回复"}</span>{bot.unread && <span className="unread-badge" role="img" aria-label="有未读消息" />}</span></span>
@@ -145,6 +146,22 @@ function BotList({ controller, state, onMenu, source, onWorkspace, density }: { 
   </aside>;
 }
 
+function ConversationList({ bot, controller, state, close }: { bot: Bot; controller: MobileController; state: State; close(): void }) {
+  const items = controller.conversations(bot), sync = state.conversationSync[botKey(bot)];
+  const refresh = async () => { await controller.refresh(bot.workspace.id); await controller.syncConversations([controller.selectedBot() ?? bot], true); };
+  const row = (item: Conversation) => <button key={item.threadId} className="conversation-row" aria-current={item.threadId === bot.threadId ? "page" : undefined} onClick={() => { void controller.select(bot, item.threadId); close(); }}>
+    <MessagesSquare size={19} aria-hidden /><span className="conversation-row-content"><span className="conversation-row-heading"><strong>{item.title}</strong><time>{clock(item.reply?.timestamp)}</time></span><span className="conversation-preview">{item.reply ? preview(item.reply) : "尚无 Bot 回复"}</span></span>{item.unread && <i className="conversation-unread" role="img" aria-label="有未读消息" />}{item.threadId === bot.threadId && <Check size={18} aria-label="当前对话" />}
+  </button>;
+  return <PanelFrame title="对话列表" back={close} action={<button className="icon-button" aria-label="刷新对话列表" disabled={sync?.loading || !bot.workspace.online} onClick={() => void refresh()}><RefreshCw size={19} className={sync?.loading ? "spin" : ""} /></button>}>
+    <p className="conversation-owner">{bot.name} · {bot.workspace.name}</p>
+    {sync?.loading && <p className="conversation-loading" role="status"><Spinner />正在同步对话…</p>}
+    {sync?.error && <p className="panel-error" role="alert">{sync.error}</p>}
+    {(!bot.workspace.online || state.offline) && <p className="settings-note">离线模式，显示已同步的对话。</p>}
+    <nav className="conversation-list" aria-label="对话">{items.filter(item => !item.archived).map(row)}</nav>
+    {items.some(item => item.archived) && <details className="archived-conversations"><summary>已归档的对话</summary><nav className="conversation-list" aria-label="已归档的对话">{items.filter(item => item.archived).map(row)}</nav></details>}
+  </PanelFrame>;
+}
+
 function Chat({ state, controller }: { state: State; controller: MobileController }) {
   const bot = controller.selectedBot();
   const panel = useRef<HTMLElement>(null);
@@ -155,12 +172,14 @@ function Chat({ state, controller }: { state: State; controller: MobileControlle
   const atBottom = useRef(true);
   const [newMessages, setNewMessages] = useState(false);
   const [attachMenu, setAttachMenu] = useState(false);
+  const [conversationsOpen, setConversationsOpen] = useState(false);
   const images = bot ? state.images[`${botKey(bot)}/${bot.threadId}`] ?? [] : [];
   const messages = state.messages.filter(message => message.kind !== "activity" && message.kind !== "digest");
   const lastMessage = messages.at(-1);
   const lastAttachments = JSON.stringify(lastMessage?.attachments);
   const draft = bot ? state.drafts[`${botKey(bot)}/${bot.threadId}`] ?? "" : "";
   useEffect(() => { atBottom.current = true; setNewMessages(false); }, [state.selected, state.selectedThread]);
+  useEffect(() => { setConversationsOpen(false); }, [state.selected]);
   useEffect(() => {
     const element = scroll.current;
     if (!element) return;
@@ -175,6 +194,8 @@ function Chat({ state, controller }: { state: State; controller: MobileControlle
   }, [state.selected, state.selectedThread]);
   useEffect(() => { if (composer.current) { composer.current.style.height = "auto"; composer.current.style.height = Math.min(composer.current.scrollHeight, 140) + "px"; } }, [draft]);
   if (!bot) return <section className="chat-placeholder"><img src="/brand/mark.svg" alt="" /><h2>选一个 Bot，接着聊。</h2><p>消息与电脑和 Cloud 中的会话保持同步。</p></section>;
+  const conversations = controller.conversations(bot), current = conversations.find(item => item.threadId === bot.threadId);
+  const otherUnread = conversations.some(item => item.threadId !== bot.threadId && item.unread);
   const send = (event: FormEvent) => { event.preventDefault(); void controller.send(); };
   const loadOlder = async () => {
     const element = scroll.current; const previous = element?.scrollHeight ?? 0;
@@ -182,7 +203,8 @@ function Chat({ state, controller }: { state: State; controller: MobileControlle
     requestAnimationFrame(() => { if (element) element.scrollTop += element.scrollHeight - previous; });
   };
   return <section ref={panel} className="chat-panel" aria-label={`${bot.name} 的会话`}>
-    <header className="chat-header"><IconButton className="back-button" label="返回 Bot 列表" onClick={() => controller.back()}><ArrowLeft size={22} /></IconButton><ConversationAvatar controller={controller} state={state} bot={bot} size={30} /><div className="chat-identity"><h1>{bot.name}</h1><p>{bot.workspace.kind === "cloud" ? <Cloud size={11} /> : <Monitor size={11} />}{bot.workspace.name}<span>·</span>{bot.busy ? "正在处理任务" : bot.workspace.online ? "在线" : "离线"}</p></div><span className="encrypted-indicator" title="端到端加密连接"><ShieldCheck size={17} /></span></header>
+    <header className="chat-header"><IconButton className="back-button" label="返回 Bot 列表" onClick={() => controller.back()}><ArrowLeft size={22} /></IconButton><ConversationAvatar controller={controller} state={state} bot={bot} size={30} /><div className="chat-identity"><h1>{bot.name}</h1><p title={`${current?.title ?? ""} · ${bot.workspace.name}`}><span className="chat-conversation-title">{current?.title}</span><span>·</span>{bot.busy ? "正在处理任务" : bot.workspace.online ? "在线" : "离线"}</p></div><button className="icon-button conversation-switcher" aria-label={otherUnread ? "切换对话，其他对话有未读消息" : "切换对话"} title="对话列表" aria-haspopup="dialog" aria-expanded={conversationsOpen} onClick={() => { setConversationsOpen(true); void controller.syncConversations([bot]); }}><MessagesSquare size={21} />{otherUnread && <i className="conversation-unread" aria-hidden />}</button></header>
+    {conversationsOpen && <ConversationList bot={bot} state={state} controller={controller} close={() => setConversationsOpen(false)} />}
     <div className="messages-area"><div className="messages-scroll" ref={scroll} onScroll={() => { const element = scroll.current; if (element) { atBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 90; if (atBottom.current) setNewMessages(false); } }}>
       <div className="messages-content" ref={content}>{state.hasMore && <button className="history-button" onClick={() => void loadOlder()} disabled={state.loadingMessages}>{state.loadingMessages ? <Spinner /> : "查看更早消息"}</button>}
       {state.loadingMessages && !state.messages.length && <div className="loading-messages" role="status"><Spinner />正在同步消息…</div>}

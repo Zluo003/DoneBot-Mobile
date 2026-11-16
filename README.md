@@ -27,6 +27,8 @@ pnpm dev:fixture
 
 访问 `http://127.0.0.1:5174`。合成账号为 `preview@donebot.test`，密码 `donebot-preview`。这些凭据只在内存夹具中有效；测试不接触真实账号、Bot 或用户资料。网页预览不提供系统推送，登录状态只保存在内存中。
 
+`MOBILE_CONVERSATIONS_FIXTURE=1 pnpm dev:fixture` 提供电脑与 Cloud 的多对话验证数据。手机点开 Bot 时，默认选择未归档对话中最后收到 Bot 回复的那一段；右上角的对话入口可切换并显示其他对话的未读红点。列表预览也采用最近的 Bot 回复，用户消息及工具活动不会覆盖预览。进入后保持当前对话，切换对话不改变电脑的选择，草稿与附件按对话分别保留。离线时使用手机已经同步的对话与消息。
+
 ```sh
 pnpm test
 pnpm build

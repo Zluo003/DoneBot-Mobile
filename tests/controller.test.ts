@@ -58,6 +58,111 @@ function fixture() {
 }
 
 describe("conversation isolation", () => {
+  it("opens the latest Bot reply across conversations and keeps explicit choices, drafts and sends independent", async () => {
+    const fx = fixture(), original = fx.request.getMockImplementation()!;
+    const tasks = [{ threadId: "thread-one", title: "原对话", updatedAt: 500 }, { threadId: "other-one", title: "新工作", updatedAt: 300, unread: true }];
+    const reply = (id: string, at: number, role = "bot") => ({ id, at, role, text: id });
+    const histories: Record<string, unknown[]> = { "thread-one": [reply("old-bot", 100), reply("new-user", 500, "user")], "other-one": [reply("new-bot", 300)] };
+    fx.request.mockImplementation(async (path, options) => {
+      if (path.startsWith("/api/bots?")) return { bots: [{ ...fx.bots[0], tasks, messages: histories["thread-one"], hasMore: false }] };
+      if (path.startsWith("/api/threads/")) return { messages: histories[path.split("/")[3]], hasMore: false };
+      return original(path, options);
+    });
+    await fx.login();
+    await fx.controller.select(fx.controller.snapshot().bots[0]);
+    expect(fx.controller.selectedBot()?.threadId).toBe("other-one");
+    expect(fx.controller.snapshot().messages.at(-1)?.id).toBe("new-bot");
+    fx.controller.setDraft("另一段的草稿");
+    await fx.controller.select(fx.controller.selectedBot()!, "thread-one");
+    fx.controller.setDraft("发到原对话"); await fx.controller.send();
+    expect(fx.request.mock.calls.find(([, options]) => (options?.body as { text?: string })?.text)?.[1]?.body).toMatchObject({ threadId: "thread-one", text: "发到原对话" });
+    expect(fx.controller.snapshot().drafts["computer/one/other-one"]).toBe("另一段的草稿");
+    tasks[1].unread = true; tasks[1].updatedAt = 600; histories["other-one"] = [reply("new-bot", 300), reply("unread-bot", 600)];
+    await fx.controller.refresh();
+    await fx.controller.syncConversations(fx.controller.snapshot().bots);
+    expect(fx.controller.selectedBot()?.threadId).toBe("thread-one");
+    expect(fx.controller.conversations(fx.controller.selectedBot()!).some(item => item.threadId !== "thread-one" && item.unread)).toBe(true);
+    await fx.controller.select(fx.controller.selectedBot()!, "other-one");
+    expect(fx.controller.conversations(fx.controller.selectedBot()!).some(item => item.unread)).toBe(false);
+    expect(fx.request.mock.calls.filter(([path]) => path.includes("/tasks"))).toEqual([]);
+    fx.controller.back(); await fx.controller.select(fx.controller.snapshot().bots[0]);
+    expect(fx.controller.selectedBot()?.threadId).toBe("other-one");
+  });
+
+  it("pages past internal events to locate a reply and reuses unchanged conversation summaries", async () => {
+    const fx = fixture(), original = fx.request.getMockImplementation()!;
+    fx.request.mockImplementation(async (path, options) => {
+      if (path.startsWith("/api/bots?")) return { bots: [{ ...fx.bots[0], hasMore: false, messages: [], tasks: [{ threadId: "thread-one", updatedAt: 1 }, { threadId: "other-one", updatedAt: 5 }] }] };
+      if (path.startsWith("/api/threads/other-one/")) return path.includes("before=")
+        ? { messages: [{ id: "reply", role: "bot", at: 4 }], hasMore: false }
+        : { messages: [{ id: "tool", role: "bot", kind: "activity", at: 5 }], hasMore: true };
+      return original(path, options);
+    });
+    await fx.login(); await fx.controller.syncConversations(fx.controller.snapshot().bots);
+    const reads = () => fx.request.mock.calls.filter(([path]) => path.startsWith("/api/threads/other-one/")).length;
+    expect(reads()).toBe(2);
+    expect(fx.controller.latestConversation(fx.controller.snapshot().bots[0])?.threadId).toBe("other-one");
+    await fx.controller.refresh(); await fx.controller.syncConversations(fx.controller.snapshot().bots);
+    expect(reads()).toBe(2);
+    expect(fx.controller.conversations(fx.controller.snapshot().bots[0]).find(item => item.threadId === "other-one")?.reply?.id).toBe("reply");
+  });
+
+  it("opens the exact notification thread even when a different conversation has a later reply", async () => {
+    const fx = fixture(); await fx.controller.boot(); await fx.login();
+    fx.open({ accountId: "account", workspaceId: "computer", botId: "one", threadId: "other-one" });
+    await vi.waitFor(() => expect(fx.controller.selectedBot()?.threadId).toBe("other-one"));
+  });
+
+  it("cancels a pending default choice on back and never applies a late summary after logout", async () => {
+    const fx = fixture(), original = fx.request.getMockImplementation()!, held = deferred<unknown>();
+    fx.request.mockImplementation(async (path, options) => path.startsWith("/api/threads/") ? held.promise : original(path, options));
+    await fx.controller.boot(); await fx.login();
+    const selecting = fx.controller.select(fx.controller.snapshot().bots[0]);
+    expect(fx.controller.snapshot().openingBot).toBe("computer/one");
+    fx.active(false);
+    expect(fx.controller.snapshot().openingBot).toBeNull();
+    fx.active(true); fx.controller.back(); await fx.controller.logout();
+    held.resolve({ messages: [{ id: "late", role: "bot", at: Date.now() }], hasMore: false }); await selecting;
+    expect(fx.controller.snapshot()).toMatchObject({ selected: null, openingBot: null, bots: [], conversationSync: {} });
+  });
+
+  it("continues past an inaccessible conversation and retries it without hiding other replies", async () => {
+    const fx = fixture(), original = fx.request.getMockImplementation()!;
+    let available = false;
+    fx.request.mockImplementation(async (path, options) => {
+      if (path.startsWith("/api/bots?")) return { bots: [{ ...fx.bots[0], tasks: [{ threadId: "thread-one", updatedAt: 1 }, { threadId: "other-one", updatedAt: 2 }], hasMore: false, messages: [{ id: "known", role: "bot", at: 1 }] }] };
+      if (path.startsWith("/api/threads/other-one/")) {
+        if (!available) throw new Error("Synthetic thread unavailable");
+        return { messages: [{ id: "recovered", role: "bot", at: 2 }], hasMore: false };
+      }
+      return original(path, options);
+    });
+    await fx.login(); await fx.controller.syncConversations(fx.controller.snapshot().bots);
+    expect(fx.controller.snapshot().conversationSync["computer/one"].error).toContain("部分对话尚未同步");
+    expect(fx.controller.latestConversation(fx.controller.snapshot().bots[0])?.reply?.id).toBe("known");
+    available = true;
+    await fx.controller.syncConversations(fx.controller.snapshot().bots);
+    expect(fx.controller.snapshot().conversationSync["computer/one"].error).toBe("");
+    await fx.controller.select(fx.controller.snapshot().bots[0]);
+    expect(fx.controller.selectedBot()?.threadId).toBe("other-one");
+  });
+
+  it("restores the latest-reply conversation from phone storage while offline", async () => {
+    const fx = fixture(), original = fx.request.getMockImplementation()!;
+    fx.request.mockImplementation(async (path, options) => {
+      if (path.startsWith("/api/bots?")) return { bots: [{ ...fx.bots[0], hasMore: false, messages: [], tasks: [{ threadId: "thread-one", title: "旧工作", updatedAt: 1 }, { threadId: "other-one", title: "最新工作", updatedAt: 2 }] }] };
+      if (path.startsWith("/api/threads/other-one/")) return { messages: [{ id: "saved-reply", role: "bot", at: 2, text: "本机缓存的最新回复" }], hasMore: false };
+      return original(path, options);
+    });
+    await fx.login(); await fx.controller.syncConversations(fx.controller.snapshot().bots);
+    fx.controller.dispose(); fx.fetcher.mockRejectedValue(new Error("Airplane mode"));
+    const restarted = new MobileController(new MobileApi(fx.platform.vault), fx.platform, fx.connect); controllers.push(restarted);
+    await restarted.boot(); await restarted.select(restarted.snapshot().bots[0]);
+    expect(restarted.selectedBot()?.threadId).toBe("other-one");
+    expect(restarted.snapshot().messages[0].text).toBe("本机缓存的最新回复");
+    expect(restarted.conversations(restarted.selectedBot()!).find(item => item.threadId === "other-one")?.title).toBe("最新工作");
+  });
+
   it("keeps each Bot's in-flight send across navigation without duplicate sends", async () => {
     const fx = fixture(); await fx.login();
     const [one, two] = fx.controller.snapshot().bots;
@@ -422,7 +527,7 @@ describe("departments and group conversations", () => {
     });
     await fx.login();
     await vi.waitFor(() => expect(fx.request.mock.calls.some(([path]) => path.startsWith("/api/threads/"))).toBe(true));
-    const selecting = fx.controller.select(fx.controller.snapshot().bots[0]);
+    const selecting = fx.controller.select(fx.controller.snapshot().bots[0], "thread-one");
     held.resolve({ messages: [{ id: "reply", role: "bot" }], hasMore: false }); await selecting;
     expect(fx.controller.snapshot().bots[0]).toMatchObject({ unread: false, unreadCount: 0 });
     fx.controller.back();
@@ -578,7 +683,7 @@ describe("automatic status refresh and app lifecycle", () => {
     const held = deferred<unknown>();
     fx.request.mockReturnValueOnce(held.promise);
     const slow = fx.controller.refresh();
-    await vi.waitFor(() => expect(fx.request).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(fx.request.mock.calls.filter(([path]) => path.startsWith("/api/bots?"))).toHaveLength(2));
     fx.workspace.online = false;
     await fx.controller.refresh("computer");
     expect(fx.controller.snapshot().workspaces[0].online).toBe(false);
@@ -593,7 +698,7 @@ describe("automatic status refresh and app lifecycle", () => {
     const held = deferred<unknown>();
     fx.request.mockReturnValueOnce(held.promise);
     const slow = fx.controller.refresh("computer");
-    await vi.waitFor(() => expect(fx.request).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(fx.request.mock.calls.filter(([path]) => path.startsWith("/api/bots?"))).toHaveLength(2));
     await fx.controller.refresh("cloud");
     expect(fx.controller.snapshot().bots.filter(bot => bot.workspace.id === "cloud")).toHaveLength(2);
     expect(fx.controller.snapshot().sourceErrors.cloud).toBeUndefined();
@@ -625,7 +730,7 @@ describe("automatic status refresh and app lifecycle", () => {
     const fx = fixture(); await fx.controller.boot(); await fx.login();
     const held = deferred<unknown>(); fx.request.mockReturnValueOnce(held.promise);
     const stale = fx.controller.refresh();
-    await vi.waitFor(() => expect(fx.request).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(fx.request.mock.calls.filter(([path]) => path.startsWith("/api/bots?"))).toHaveLength(2));
     fx.active(false); fx.bots[0].name = "Fresh bot"; fx.active(true);
     await vi.waitFor(() => expect(fx.controller.snapshot().bots[0]?.name).toBe("Fresh bot"));
     held.resolve({ bots: [{ ...fx.bots[0], name: "Suspended stale bot" }] }); await stale;
@@ -682,8 +787,8 @@ it("does not start a message poll when a foreground refresh settles in the backg
 it("does not close a recovered connection when a pre-background history request fails late", async () => {
   const fx = fixture(); await fx.controller.boot(); await fx.login();
   const held = deferred<unknown>(); fx.request.mockReturnValueOnce(held.promise);
-  const selecting = fx.controller.select(fx.controller.snapshot().bots[0]);
-  await vi.waitFor(() => expect(fx.request).toHaveBeenCalledTimes(2));
+  const selecting = fx.controller.select(fx.controller.snapshot().bots[0], "thread-one");
+  await vi.waitFor(() => expect(fx.request.mock.calls.some(([path]) => path.startsWith("/api/threads/thread-one/"))).toBe(true));
   fx.active(false); fx.active(true);
   await vi.waitFor(() => expect(fx.connect).toHaveBeenCalledTimes(2));
   held.reject(new Error("Suspended request closed")); await selecting;
