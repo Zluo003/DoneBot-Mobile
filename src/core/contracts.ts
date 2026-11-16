@@ -26,7 +26,11 @@ export const attachmentSchema = z.object({
   name: z.string().optional(), durationMs: z.number().optional(), text: z.string().optional(),
 });
 export type Attachment = z.infer<typeof attachmentSchema>;
-export interface BinaryFile { data: Uint8Array; mime: string; name: string }
+export interface FileRange { start: number; end: number; total: number; etag: string }
+export interface BinaryFile { data: Uint8Array; mime: string; name: string; range?: FileRange }
+export interface FileCheckpoint { etag: string; total: number; received: number; parts: number; mime: string; name: string }
+export interface PartialFile { checkpoint: FileCheckpoint; chunks: Uint8Array[] }
+export interface FileProgress { received: number; total?: number; phase: "downloading" | "reconnecting" | "paused" }
 export interface PickedImage { name: string; blob: Blob }
 export interface DraftImage extends PickedImage { id: string; url: string; path?: string; kind?: "image" | "file" }
 export type FileAction = "open" | "save" | "share";
@@ -42,11 +46,16 @@ export interface OfflineStorage {
   hasFile(account: string, key: string): Promise<boolean>;
   readFile(account: string, key: string): Promise<BinaryFile | null>;
   writeFile(account: string, key: string, file: BinaryFile): Promise<void>;
+  readPartial(account: string, key: string): Promise<PartialFile | null>;
+  appendPartial(account: string, key: string, checkpoint: FileCheckpoint, data: Uint8Array): Promise<void>;
+  clearPartial(account: string, key: string): Promise<void>;
   clear(account: string): Promise<void>;
 }
 export interface RequestOptions {
   method?: "GET" | "POST" | "PATCH"; body?: unknown; signal?: AbortSignal;
   rawBody?: Uint8Array; contentType?: string; responseType?: "bytes";
+  range?: { start: number; end: number; etag?: string };
+  onProgress?(received: number): void;
 }
 
 export const messageSchema = z.object({

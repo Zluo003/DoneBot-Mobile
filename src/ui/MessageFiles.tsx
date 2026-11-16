@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Download, ExternalLink, FileText, ImageIcon, LoaderCircle, Maximize, Play, RotateCw, Share2, X } from "lucide-react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -8,11 +8,14 @@ import type { MobileController } from "../core/controller";
 import { fileName, localReference, mediaKind, messageContent, remoteReference, remoteFileLink } from "../core/media";
 import { ImagePreview } from "./ImagePreview";
 import { useSwipeNavigation } from "./gestures";
+import { cachedFileKey } from "../core/offline";
 
 function MessageMedia({ controller, bot, message, attachment }: { controller: MobileController; bot: Bot; message: Message; attachment: Attachment }) {
   const [loaded, setLoaded] = useState<{ blob: Blob; url: string; name: string }>();
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
   const [status, setStatus] = useState("");
+  const transfer = useSyncExternalStore(controller.subscribe, () => controller.snapshot().fileTransfers[cachedFileKey(bot, message.id, attachment.path)]);
+  const progressText = transfer ? `${transfer.phase === "reconnecting" ? "连接中断，正在自动续传" : transfer.phase === "paused" ? "已暂停，回到前台并联网后继续" : "正在下载"} · ${(transfer.received / 1024 / 1024).toFixed(1)} MB${transfer.total ? ` / ${(transfer.total / 1024 / 1024).toFixed(1)} MB` : ""}` : "正在下载，完成后即可查看…";
   const [expanded, setExpanded] = useState(false), [text, setText] = useState("");
   const abort = useRef(new AbortController()), link = useRef<string | undefined>(undefined), flight = useRef<Promise<{ blob: Blob; url: string; name: string }> | undefined>(undefined);
   const element = useRef<HTMLDivElement>(null), dialog = useRef<HTMLDialogElement>(null);
@@ -72,7 +75,7 @@ function MessageMedia({ controller, bot, message, attachment }: { controller: Mo
               {document && <span>{name}</span>}
             </button>}
     {error && <div className="media-error" role="alert"><span>{error}</span><button className="icon-button" aria-label={`重试 ${name}`} onClick={() => void action("view")} disabled={busy}><RotateCw size={18} /></button></div>}
-    {busy && !loaded && <span className="media-download-status" role="status">正在下载，完成后即可查看…</span>}
+    {busy && !loaded && <span className="media-download-status" role="status">{progressText}</span>}
     {expanded && loaded && <dialog ref={dialog} className="media-viewer" aria-label={`预览 ${name}`} onCancel={() => setExpanded(false)} onClick={event => { if (event.target instanceof Element && !event.target.closest("button, a, img, video, audio, iframe, pre, .document-cover, .zoomable-image")) setExpanded(false); }}>
       <header><button className="viewer-close" aria-label="关闭预览" onClick={() => setExpanded(false)}><X size={23} /></button><span>{name}</span></header>
       <div className="media-viewer-body">{kind === "image" ? <ImagePreview src={loaded.url} alt={name} close={() => setExpanded(false)} /> : kind === "video" ? <video src={loaded.url} controls autoPlay playsInline onError={playbackError} /> : kind === "audio" ? <audio src={loaded.url} controls autoPlay onError={playbackError} /> : kind === "pdf" ? <iframe src={loaded.url} title={name} /> : kind === "text" && text ? <pre>{text}</pre> : <div className="document-cover"><FileText size={64} /><p>{name}</p><button onClick={() => void action("open")}>打开文档</button></div>}</div>

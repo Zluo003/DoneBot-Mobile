@@ -5,10 +5,11 @@ import { automationKey, automationPath, automationSchema, connectedAppsSchema, r
 import { fileName, messageFiles, mediaKind, remoteReference } from "./media";
 import { documentFile } from "./documents";
 import { AccountCache, cachedFileKey, mergeMessagePage, offlineSnapshot } from "./offline";
-import { MAX_FILE_BYTES } from "./relay";
-import { MobileApi } from "./api";
+import { downloadFileSegments, externalFileRequest, transferDelay } from "./file-download";
+import { TransferError } from "./transfer-error";
+import { ApiError, MobileApi } from "./api";
 import { RelayConnection, pinConnection } from "./relay";
-import { botKey, botSchema, directorySchema, errorMessage, messagePageSchema, type Bot, type Message, type NotificationRoute, type Platform, type Session, type Workspace, type WorkspaceConnection, type BinaryFile, type DraftImage } from "./contracts";
+import { botKey, botSchema, directorySchema, errorMessage, messagePageSchema, type Bot, type Message, type NotificationRoute, type Platform, type Session, type Workspace, type WorkspaceConnection, type BinaryFile, type FileProgress, type DraftImage } from "./contracts";
 
 export interface State {
   phase: "boot" | "login" | "ready";
@@ -19,11 +20,11 @@ export interface State {
   error: string; chatError: string; sourceErrors: Record<string, string>;
   challenge: string | null; push: "off" | "on" | "busy" | "unavailable";
   pushError: string; images: Record<string, DraftImage[]>; picking: boolean; drafts: Record<string, string>;
-  offline: boolean; cacheError: string; cachePending: number;
+  offline: boolean; cacheError: string; cachePending: number; fileTransfers: Record<string, FileProgress>;
   automations: Record<string, Automation[]>; apps: Record<string, ConnectedApp[]>;
   workspaceLoading: Record<string, boolean>; workspaceErrors: Record<string, string>; automationBusy: string[];
 }
-const initial = (): State => ({ phase: "boot", session: null, bots: [], workspaces: [], sections: {}, selected: null, selectedThread: null, messages: [], hasMore: false, loading: false, loadingMessages: false, sending: false, openingBot: null, conversationSync: {}, error: "", chatError: "", sourceErrors: {}, challenge: null, push: "off", pushError: "", images: {}, picking: false, drafts: {}, offline: false, cacheError: "", cachePending: 0, automations: {}, apps: {}, workspaceLoading: {}, workspaceErrors: {}, automationBusy: [] });
+const initial = (): State => ({ phase: "boot", session: null, bots: [], workspaces: [], sections: {}, selected: null, selectedThread: null, messages: [], hasMore: false, loading: false, loadingMessages: false, sending: false, openingBot: null, conversationSync: {}, error: "", chatError: "", sourceErrors: {}, challenge: null, push: "off", pushError: "", images: {}, picking: false, drafts: {}, offline: false, cacheError: "", cachePending: 0, fileTransfers: {}, automations: {}, apps: {}, workspaceLoading: {}, workspaceErrors: {}, automationBusy: [] });
 const conversationKey = (bot: Bot) => `${botKey(bot)}/${bot.threadId}`;
 
 export class MobileController {
@@ -290,11 +291,11 @@ export class MobileController {
     if (!existing) {
       existing = (async () => {
         const descriptor = await this.api.connection(workspace.id);
-        if (epoch !== this.epoch || syncEpoch !== this.syncEpoch || !this.state.session) throw new Error("连接已更新。");
+        if (epoch !== this.epoch || syncEpoch !== this.syncEpoch || !this.state.session) throw new TransferError("连接已更新。", true);
         await pinConnection(this.platform.vault, this.state.session.account.id, workspace.id, descriptor);
-        if (epoch !== this.epoch || syncEpoch !== this.syncEpoch) throw new Error("连接已更新。");
+        if (epoch !== this.epoch || syncEpoch !== this.syncEpoch) throw new TransferError("连接已更新。", true);
         const connection = await this.connect(descriptor);
-        if (epoch !== this.epoch || syncEpoch !== this.syncEpoch || this.connections.get(workspace.id) !== existing) { connection.close(); throw new Error("连接已更新。"); }
+        if (epoch !== this.epoch || syncEpoch !== this.syncEpoch || this.connections.get(workspace.id) !== existing) { connection.close(); throw new TransferError("连接已更新。", true); }
         return connection;
       })();
       this.connections.set(workspace.id, existing);
@@ -304,7 +305,7 @@ export class MobileController {
       if (connection.closed) {
         this.evict(workspace.id);
         if (retry) return this.connection(workspace, false);
-        throw new Error("设备连接已中断，请稍后重试。");
+        throw new TransferError("设备连接已中断，请稍后重试。", true);
       }
       return connection;
     }
@@ -643,7 +644,7 @@ export class MobileController {
         if (this.state.offline || (!bot.workspace.online && !remoteReference(path))) throw new Error("此附件尚未缓存，联网并连接设备后会自动下载。");
         const file = await this.downloadFile(bot, messageId, path);
         if (epoch !== this.epoch) throw new Error("账号已切换。");
-        await cache?.putFile(key, file);
+        if (await cache?.putFile(key, file)) await cache?.clearPartial(key);
         if (epoch !== this.epoch) throw new Error("账号已切换。");
         return file;
       })();
@@ -660,52 +661,47 @@ export class MobileController {
     });
   }
   private async downloadFile(bot: Bot, messageId: string | null, path: string): Promise<BinaryFile> {
-    const epoch = this.epoch;
+    const epoch = this.epoch, cache = this.cache, key = cachedFileKey(bot, messageId, path);
     const transfer = new AbortController(); this.transfers.add(transfer);
-    try {
-      const combined = transfer.signal;
-      combined.throwIfAborted();
-      if (remoteReference(path)) {
-        let idle: ReturnType<typeof setTimeout>;
-        const progress = () => {
-          clearTimeout(idle);
-          idle = setTimeout(() => transfer.abort(new Error("文件传输长时间没有进度，请重试。")), 180_000);
-        };
-        progress();
-        try {
-          const response = await fetch(path, { credentials: "omit", referrerPolicy: "no-referrer", signal: combined });
-          progress();
-          if (!response.ok) throw new Error("无法读取外部文件，请稍后重试。");
-          const chunks: Uint8Array[] = []; let size = 0;
-          const reader = response.body?.getReader();
-          if (Number(response.headers.get("content-length")) > MAX_FILE_BYTES) { await response.body?.cancel(); throw new Error("文件超过手机端 100 MB 的读取上限。"); }
-          if (reader) {
-            try {
-              while (true) {
-                const { done, value } = await reader.read(); if (done) break;
-                if (value.length) progress();
-                size += value.length;
-                if (size > MAX_FILE_BYTES) throw new Error("文件超过手机端 100 MB 的读取上限。");
-                chunks.push(value);
-              }
-            } finally { await reader.cancel().catch(() => {}); }
-          } else {
-            const data = new Uint8Array(await response.arrayBuffer());
-            if (data.length > MAX_FILE_BYTES) throw new Error("文件超过手机端 100 MB 的读取上限。");
-            chunks.push(data);
-          }
-          if (epoch !== this.epoch) throw new Error("账号已切换。");
-          return { data: new Uint8Array(await new Blob(chunks as BlobPart[]).arrayBuffer()), mime: response.headers.get("content-type") || "application/octet-stream", name: fileName(path) };
-        } finally { clearTimeout(idle!); }
+    let reported = 0;
+    const progress = (value: FileProgress) => {
+      if (epoch !== this.epoch) return;
+      const previous = this.state.fileTransfers[key];
+      if (previous?.phase === value.phase && value.received !== value.total && Date.now() - reported < 150) return;
+      reported = Date.now();
+      this.update({ fileTransfers: { ...this.state.fileTransfers, [key]: value } });
+    };
+    const ready = async () => {
+      while (!this.visible || (typeof navigator !== "undefined" && navigator.onLine === false)) {
+        const saved = this.state.fileTransfers[key];
+        progress({ received: saved?.received ?? 0, total: saved?.total, phase: "paused" });
+        await transferDelay(500, transfer.signal);
       }
-      const connection = await this.connection(bot.workspace);
-      const reply = await connection.request<BinaryFile>(messageId ? `/api/threads/${bot.threadId}/messages/${messageId}/file` : path, { ...(messageId ? { method: "POST", body: { path } } : {}), responseType: "bytes", signal: combined });
+    };
+    try {
+      return await downloadFileSegments({ key, cache, signal: transfer.signal, ready, progress,
+        request: async options => {
+          await ready();
+          if (remoteReference(path)) return externalFileRequest(path, options);
+          let connection: WorkspaceConnection;
+          try { connection = await this.connection(bot.workspace); }
+          catch (error) {
+            if (error instanceof ApiError) throw new TransferError(error.message, error.status >= 500 || error.status === 429, error.status);
+            throw error;
+          }
+          transfer.signal.throwIfAborted();
+          return connection.request<BinaryFile>(messageId ? `/api/threads/${bot.threadId}/messages/${messageId}/file` : path,
+            { ...options, ...(messageId ? { method: "POST", body: { path } } : {}) });
+        },
+      });
+    } catch (error) {
       if (epoch !== this.epoch) throw new Error("账号已切换。");
-      return reply;
+      throw error;
     } finally { this.transfers.delete(transfer); }
   }
   private clearMedia(): void {
     this.transfers.forEach(transfer => transfer.abort()); this.transfers.clear();
+    this.update({ fileTransfers: {} });
     this.fileFlights.clear(); this.fileQueue.clear(); this.fileAttempts.clear(); this.failedFiles.clear();
     Object.values(this.state.images).flat().forEach(image => URL.revokeObjectURL(image.url));
     void this.platform.media.clear();

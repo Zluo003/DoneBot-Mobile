@@ -12,7 +12,7 @@ afterEach(() => { active.splice(0).forEach(connection => connection.close()); vi
 async function fixture() {
   vi.useFakeTimers();
   const key = generateKeyPair(), deviceToken = "omb_synthetic_transport_test";
-  const requests: Array<{ path: string; socket: Duplex }> = [];
+  const requests: Array<{ path: string; socket: Duplex; head: string }> = [];
   let stalled = false;
   class Socket {
     static OPEN = 1;
@@ -33,7 +33,7 @@ async function fixture() {
         let head = "";
         const socket = new Duplex({ read() {}, write(chunk, _encoding, done) {
           head += chunk.toString();
-          if (head.includes("\r\n\r\n") && !requests.some(request => request.socket === socket)) requests.push({ path: head.split(" ")[1], socket });
+          if (head.includes("\r\n\r\n") && !requests.some(request => request.socket === socket)) requests.push({ path: head.split(" ")[1], socket, head });
           done();
         } });
         return socket;
@@ -53,7 +53,7 @@ async function fixture() {
   const request = async <T>(path: string, options?: Parameters<RelayConnection["request"]>[1]) => {
     const promise = connection.request<T>(path, options);
     await flush();
-    return { promise, socket: requests.at(-1)!.socket };
+    return { promise, socket: requests.at(-1)!.socket, head: requests.at(-1)!.head };
   };
   return { connection, request, flush, stall: () => { stalled = true; } };
 }
@@ -100,4 +100,15 @@ it("accepts only named document uploads with a stable id", () => {
   expect(mobileRequestAllowed("POST", path + encodeURIComponent("工作说明.pdf"))).toBe(true);
   for (const name of ["", ".", "..", "../secret.pdf", "a\\b.pdf", "a\u0000.pdf", "a".repeat(181)]) expect(mobileRequestAllowed("POST", path + encodeURIComponent(name))).toBe(false);
   expect(mobileRequestAllowed("POST", path + "note.pdf&admin=1")).toBe(false);
+});
+
+it("sends Range and If-Range inside encryption and preserves the server version and byte boundaries", async () => {
+  const fx = await fixture(), progress = vi.fn();
+  const part = await fx.request("/api/threads/t/messages/m/file", { method: "POST", body: { path: "/film.mp4" }, responseType: "bytes", range: { start: 3, end: 6, etag: '"version"' }, onProgress: progress });
+  expect(part.head).toContain('Range: bytes=3-6\r\nIf-Range: "version"\r\n');
+  part.socket.push(Buffer.from('HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Length: 4\r\nETag: "version"\r\nContent-Range: bytes 3-6/10\r\n\r\n'));
+  part.socket.push(Buffer.from([3, 4, 5, 6])); part.socket.push(null);
+  expect(await part.promise).toEqual({ data: new Uint8Array([3, 4, 5, 6]), mime: "video/mp4", name: "", range: { start: 3, end: 6, total: 10, etag: '"version"' } });
+  expect(progress).toHaveBeenLastCalledWith(4);
+  await expect(fx.connection.request("/api/threads/t/messages/m/file", { method: "POST", responseType: "bytes", range: { start: 0, end: 1, etag: '"tag"\r\nInjected: x' } })).rejects.toThrow("范围无效");
 });

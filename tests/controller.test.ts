@@ -4,7 +4,9 @@ import { indexedDBStorage } from "../src/platform/cache";
 import { cachedFileKey } from "../src/core/offline";
 import { MobileApi } from "../src/core/api";
 import { MobileController } from "../src/core/controller";
-import { messageSchema, type NotificationRoute, type Platform, type PushRegistration, type WorkspaceConnection } from "../src/core/contracts";
+import { messageSchema, type NotificationRoute, type Platform, type PushRegistration, type RequestOptions, type WorkspaceConnection } from "../src/core/contracts";
+import { FILE_SEGMENT_BYTES } from "../src/core/file-download";
+import { TransferError } from "../src/core/transfer-error";
 import vectors from "./fixtures/e2e-v1.json";
 
 function deferred<T>() {
@@ -44,7 +46,7 @@ function fixture() {
   });
   vi.stubGlobal("fetch", fetcher);
   vi.stubGlobal("document", Object.assign(new EventTarget(), { hidden: false }));
-  const request = vi.fn(async (path: string, _options?: { method?: string; body?: unknown }): Promise<unknown> => {
+  const request = vi.fn(async (path: string, _options?: RequestOptions): Promise<unknown> => {
     if (path.startsWith("/api/bots?")) return { bots: structuredClone(bots) };
     if (path.startsWith("/api/threads/")) return { messages: [], hasMore: false };
     return { ok: true };
@@ -233,7 +235,7 @@ describe("offline conversations and automatic file caching", () => {
     fx.request.mockImplementation(async (path, options) => {
       if (path.startsWith("/api/bots?")) return { bots: fx.bots.map((bot, index) => ({ ...bot, messages: index === 0 ? [message] : [] })) };
       if (path.endsWith("/file")) {
-        const name = (options?.body as { path: string }).path.slice(1);
+        const name = ((options?.body as { path: string } | undefined)?.path ?? "/file").slice(1);
         return { data: new TextEncoder().encode(`contents:${name}`), mime: name.endsWith(".png") ? "image/png" : name.endsWith(".mp4") ? "video/mp4" : "application/pdf", name };
       }
       if (path.startsWith("/api/threads/")) return { messages: [message], hasMore: false };
@@ -300,7 +302,7 @@ describe("offline conversations and automatic file caching", () => {
     expect(await reading).toMatchObject({ mime: "video/mp4", data: new Uint8Array([0, 1, 2, 3, 4]) });
     expect(fx.controller.snapshot().session?.account.id).toBe("account");
   });
-  it("aborts a stalled external download without signing out or closing the workspace", async () => {
+  it("automatically retries a stalled external download without signing out or closing the workspace", async () => {
     const fx = fixture(); await fx.login();
     vi.useFakeTimers();
     let signal!: AbortSignal;
@@ -310,9 +312,14 @@ describe("offline conversations and automatic file caching", () => {
         signal.addEventListener("abort", () => controller.error(signal.reason), { once: true });
       } }));
     });
-    const result = expect(fx.controller.file(fx.controller.snapshot().bots[0], "video", "https://media.example.test/stalled.mp4")).rejects.toThrow("没有进度");
+    fx.fetcher.mockImplementationOnce(async () => new Response(new Uint8Array([3, 4]), { headers: { "content-type": "video/mp4" } }));
+    const result = fx.controller.file(fx.controller.snapshot().bots[0], "video", "https://media.example.test/stalled.mp4");
     await vi.waitFor(() => expect(signal).toBeDefined());
-    await vi.advanceTimersByTimeAsync(180_001); await result;
+    await vi.advanceTimersByTimeAsync(180_001);
+    expect(signal.aborted).toBe(true);
+    expect(Object.values(fx.controller.snapshot().fileTransfers).some(value => value.phase === "reconnecting")).toBe(true);
+    await vi.advanceTimersByTimeAsync(1000); vi.useRealTimers();
+    expect((await result).data).toEqual(new Uint8Array([3, 4]));
     expect(fx.controller.snapshot().session?.account.id).toBe("account");
     expect(fx.connection.close).not.toHaveBeenCalled();
     vi.useRealTimers(); await fx.controller.refresh();
@@ -807,4 +814,48 @@ it("keeps both computer and Cloud online when their Bots carry desktop expressio
   expect(snapshot.bots).toHaveLength(4);
   expect(snapshot.bots.every(bot => bot.workspace.online)).toBe(true);
   expect(snapshot.bots.map(bot => bot.mascotExpression)).toEqual(["proud", "happy", "proud", "happy"]);
+});
+
+it.each(["computer", "cloud"].flatMap(kind => ["image/png", "video/mp4", "audio/mpeg", "application/pdf"].map(mime => ({ kind, mime }))))("reconnects and resumes $mime from $kind without resetting other streams", async ({ kind, mime }) => {
+  const fx = fixture(), original = fx.request.getMockImplementation()!;
+  fx.workspace.kind = kind;
+  let closed = false, interrupted = false;
+  Object.defineProperty(fx.connection, "closed", { get: () => closed });
+  fx.connect.mockImplementation(async () => { closed = false; return fx.connection; });
+  const source = new Uint8Array(FILE_SEGMENT_BYTES + 71).fill(113), offsets: number[] = [];
+  fx.request.mockImplementation(async (path, options) => {
+    if (options?.responseType !== "bytes") return original(path, options);
+    const start = options.range!.start, end = Math.min(options.range!.end, source.length - 1);
+    offsets.push(start);
+    if (start && !interrupted) { interrupted = true; closed = true; throw new TransferError("socket closed", true); }
+    return { data: source.slice(start, end + 1), mime, name: "asset", range: { start, end, total: source.length, etag: '"fixture-version"' } };
+  });
+  await fx.login();
+  const result = await fx.controller.file(fx.controller.snapshot().bots[0], "media", "/asset");
+  expect(result).toEqual({ data: source, mime, name: "asset" });
+  expect(offsets).toEqual([0, FILE_SEGMENT_BYTES, FILE_SEGMENT_BYTES, 0]);
+  expect(fx.connect).toHaveBeenCalledTimes(2);
+  await fx.controller.refresh();
+  expect(fx.controller.snapshot().sourceErrors).toEqual({});
+});
+
+it("pauses an interrupted download in background and resumes its checkpoint in foreground", async () => {
+  const fx = fixture(), original = fx.request.getMockImplementation()!;
+  await fx.controller.boot();
+  const source = new Uint8Array(FILE_SEGMENT_BYTES + 17).fill(77), offsets: number[] = [];
+  let interrupted = false;
+  fx.request.mockImplementation(async (path, options) => {
+    if (options?.responseType !== "bytes") return original(path, options);
+    const start = options.range!.start, end = Math.min(options.range!.end, source.length - 1);
+    offsets.push(start);
+    if (start && !interrupted) { interrupted = true; fx.active(false); throw new TransferError("background", true); }
+    return { data: source.slice(start, end + 1), mime: "video/mp4", name: "video", range: { start, end, total: source.length, etag: '"version"' } };
+  });
+  await fx.login();
+  const result = fx.controller.file(fx.controller.snapshot().bots[0], "video", "/video");
+  await vi.waitFor(() => expect(Object.values(fx.controller.snapshot().fileTransfers).some(value => value.phase === "paused")).toBe(true), { timeout: 2500 });
+  expect(offsets).toEqual([0, FILE_SEGMENT_BYTES]);
+  fx.active(true);
+  expect((await result).data).toEqual(source);
+  expect(offsets).toEqual([0, FILE_SEGMENT_BYTES, FILE_SEGMENT_BYTES, 0]);
 });

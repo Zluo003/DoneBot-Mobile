@@ -3,6 +3,7 @@ import { admission, b64u, credentialHash, fromB64u, keyId, psk } from "../deskto
 import { encodePayload1, isPublicKey, newConn, NoiseError, phoneHello, type PhoneHello, type SessionKeys } from "../desktop/noise";
 import { decodeFrame, encodeFrame, Mux } from "../desktop/yamux";
 import type { ConnectionDescriptor, SecureVault, WorkspaceConnection, RequestOptions } from "./contracts";
+import { TransferError } from "./transfer-error";
 
 const MAX_RESPONSE = 8 * 1024 * 1024;
 export const MAX_FILE_BYTES = 100 * 1024 * 1024;
@@ -28,7 +29,8 @@ export async function pinConnection(vault: SecureVault, accountId: string, works
 export function decodeHttp(bytes: Uint8Array, binary = false): { status: number; body: unknown } {
   const raw = Buffer.from(bytes);
   const boundary = raw.indexOf("\r\n\r\n");
-  if (boundary < 0 || boundary > 32 * 1024) throw new Error("设备返回的消息不完整。");
+  if (boundary < 0) throw new TransferError("设备返回的消息不完整。", true);
+  if (boundary > 32 * 1024) throw new Error("设备返回的响应头过大。");
   const headers = raw.subarray(0, boundary).toString("utf8");
   const status = Number(/^HTTP\/1\.[01] (\d{3}) /.exec(headers)?.[1]);
   if (!status) throw new Error("设备返回了无效响应。");
@@ -39,19 +41,19 @@ export function decodeHttp(bytes: Uint8Array, binary = false): { status: number;
     const chunks: Buffer[] = [];
     while (true) {
       const end = body.indexOf("\r\n");
-      if (end < 1) throw new Error("设备响应中断。");
+      if (end < 1) throw new TransferError("设备响应中断。", true);
       const sizeText = body.subarray(0, end).toString().split(";")[0];
       if (!/^[0-9a-f]+$/i.test(sizeText)) throw new Error("设备响应格式无效。");
       const size = parseInt(sizeText, 16);
       body = body.subarray(end + 2);
       if (size === 0) break;
-      if (body.length < size + 2 || body[size] !== 13 || body[size + 1] !== 10) throw new Error("设备响应中断。");
+      if (body.length < size + 2 || body[size] !== 13 || body[size + 1] !== 10) throw new TransferError("设备响应中断。", true);
       chunks.push(body.subarray(0, size)); body = body.subarray(size + 2);
     }
     body = Buffer.concat(chunks);
   } else {
     const length = /^content-length:\s*(\d+)\s*$/im.exec(headers);
-    if (length && body.length !== Number(length[1])) throw new Error("设备响应中断。");
+    if (length && body.length !== Number(length[1])) throw new TransferError("设备响应中断。", true);
   }
   if (!binary) return { status, body: body.length ? JSON.parse(text.decode(body)) : null };
   if (status < 200 || status >= 300) {
@@ -63,26 +65,30 @@ export function decodeHttp(bytes: Uint8Array, binary = false): { status: number;
   }
   const mime = /^content-type:[ \t]*([^\r\n]+)/im.exec(headers)?.[1].trim() || "application/octet-stream";
   const disposition = /^content-disposition:[ \t]*([^\r\n]+)/im.exec(headers)?.[1] ?? "";
+  const etag = /^etag:[ \t]*([^\r\n]+)/im.exec(headers)?.[1]?.trim();
+  const contentRange = /^content-range:[ \t]*bytes (\d+)-(\d+)\/(\d+)\s*$/im.exec(headers);
   let name = /filename="([^"]+)"/i.exec(disposition)?.[1] ?? "";
   const encoded = /filename\*=UTF-8''([^;\s]+)/i.exec(disposition)?.[1];
   if (encoded) { try { name = decodeURIComponent(encoded); } catch { } }
-  return { status, body: { data: new Uint8Array(body), mime, name } };
+  if (status === 206 && !contentRange) throw new Error("文件分段响应无效。");
+  return { status, body: { data: new Uint8Array(body), mime, name, ...(status === 206 && contentRange ? { range: { start: Number(contentRange[1]), end: Number(contentRange[2]), total: Number(contentRange[3]), etag: etag ?? "" } } : {}) } };
 }
 
 export function responseError(status: number, body: unknown, binary = false): Error {
   const detail = body && typeof body === "object" && "error" in body ? body.error : undefined;
   if (binary) {
     if (status === 403 && detail === "mobile request refused") return new Error("此电脑或 Cloud 的版本尚不支持此手机操作，请更新后重试。");
-    if (status === 404) return new Error("文件已移动或不存在，请让 Bot 重新发送。");
-    if (status === 413) return new Error("文件超过手机端的读取上限。");
-    if (status === 401) return new Error("连接已失效，请返回列表重新连接。");
-    return new Error("未能读取此附件，请重试或让 Bot 重新发送。");
+    if (status === 404) return new TransferError("文件已移动或不存在，请让 Bot 重新发送。", false, status);
+    if (status === 413) return new TransferError("文件超过手机端的读取上限。", false, status);
+    if (status === 401) return new TransferError("连接已失效，请返回列表重新连接。", false, status);
+    return new TransferError("未能读取此附件，请重试或让 Bot 重新发送。", status >= 500, status);
   }
   return new Error(status === 403 ? "连接暂时不可用，请返回列表重新连接。" : status === 409 ? "当前会话暂时无法发送，请稍后重试。" : "设备未能完成请求，请刷新后重试。");
 }
 
 interface Pending {
   chunks: Buffer[]; bytes: number; outgoing: Buffer; binary: boolean; limit: number;
+  headerBytes?: number; onProgress?: (received: number) => void;
   resolve(value: unknown): void; reject(error: Error): void; cleanup(): void; progress(): void;
 }
 
@@ -115,8 +121,8 @@ export class RelayConnection implements WorkspaceConnection {
     socket.binaryType = "arraybuffer";
     const connection = new RelayConnection(socket, descriptor);
     return new Promise((resolve, reject) => {
-      const fail = (error: Error) => { clearTimeout(deadline); connection.close(); reject(error); };
-      const deadline = setTimeout(() => fail(new Error("连接超时，请稍后重试。")), 20_000);
+      const fail = (error: Error) => { clearTimeout(deadline); connection.close(error); reject(error); };
+      const deadline = setTimeout(() => fail(new TransferError("连接超时，请稍后重试。", true)), 20_000);
       socket.onopen = () => socket.send(JSON.stringify({ t: "phone", v: 1, hid: descriptor.h, adm: b64u(admission(hash, hostId)) }));
       socket.onmessage = event => {
         try {
@@ -137,8 +143,8 @@ export class RelayConnection implements WorkspaceConnection {
           }
         } catch (error) { fail(error instanceof Error ? error : new Error("加密连接已中断。")); }
       };
-      socket.onclose = () => fail(new Error("设备已断开连接，请稍后重试。"));
-      socket.onerror = () => fail(new Error("无法连接设备，请检查网络。"));
+      socket.onclose = () => fail(new TransferError("设备已断开连接，请稍后重试。", true));
+      socket.onerror = () => fail(new TransferError("无法连接设备，请检查网络。", true));
     });
   }
   private startMux(): void {
@@ -150,6 +156,13 @@ export class RelayConnection implements WorkspaceConnection {
         pending.bytes += data.length;
         if (pending.bytes > pending.limit) { this.failRequest(id, new Error(pending.binary ? "文件超过手机端 100 MB 的读取上限。" : "设备返回的消息过大。")); return; }
         pending.progress(); pending.chunks.push(Buffer.from(data)); this.mux!.consumed(id, data.length);
+        if (pending.onProgress) {
+          if (pending.headerBytes === undefined) {
+            const boundary = Buffer.concat(pending.chunks).indexOf("\r\n\r\n");
+            if (boundary >= 0) pending.headerBytes = boundary + 4;
+          }
+          if (pending.headerBytes !== undefined) pending.onProgress(pending.bytes - pending.headerBytes);
+        }
       },
       ended: id => {
         const pending = this.pending.get(id);
@@ -165,7 +178,7 @@ export class RelayConnection implements WorkspaceConnection {
       },
       reset: id => {
         const pending = this.pending.get(id);
-        pending?.cleanup(); pending?.reject(new Error("连接中断，请稍后重试。")); this.pending.delete(id);
+        pending?.cleanup(); pending?.reject(new TransferError("连接中断，请稍后重试。", true)); this.pending.delete(id);
       },
       writable: id => this.flush(id),
       goAway: () => this.close(),
@@ -197,30 +210,33 @@ export class RelayConnection implements WorkspaceConnection {
   }
   async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
     if (!mobileRequestAllowed(options.method ?? "GET", path)) throw new Error("手机端不支持此操作。");
-    if (!this.mux || this.socket.readyState !== WebSocket.OPEN) throw new Error("设备已离线，请重新连接。");
+    if (!this.mux || this.socket.readyState !== WebSocket.OPEN) throw new TransferError("设备已离线，请重新连接。", true);
     options.signal?.throwIfAborted();
     const body = options.rawBody ? Buffer.from(options.rawBody) : options.body === undefined ? Buffer.alloc(0) : Buffer.from(JSON.stringify(options.body));
     if (body.length > (options.rawBody ? path.startsWith("/api/files?") ? MAX_FILE_BYTES : 10 * 1024 * 1024 : 128 * 1024)) throw new Error("附件或消息超过大小上限。");
     if (!/^omb_[A-Za-z0-9_-]+$/.test(this.descriptor.deviceToken)) throw new Error("设备授权凭据无效。");
     const contentType = options.rawBody ? options.contentType ?? "application/octet-stream" : "application/json";
     if (!/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(contentType)) throw new Error("附件格式无效。");
-    const head = Buffer.from(`${options.method ?? "GET"} ${path} HTTP/1.1\r\nHost: donebot.e2e.invalid\r\nAuthorization: Bearer ${this.descriptor.deviceToken}\r\nContent-Type: ${contentType}\r\nAccept-Encoding: identity\r\nConnection: close\r\nContent-Length: ${body.length}\r\n\r\n`);
+    const range = options.range;
+    if (range && (!Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end) || range.start < 0 || range.end < range.start || (range.etag !== undefined && !/^"[^"\r\n]+"$/.test(range.etag)))) throw new Error("文件续传范围无效。");
+    const extra = range ? `Range: bytes=${range.start}-${range.end}\r\n${range.etag ? `If-Range: ${range.etag}\r\n` : ""}` : "";
+    const head = Buffer.from(`${options.method ?? "GET"} ${path} HTTP/1.1\r\nHost: donebot.e2e.invalid\r\nAuthorization: Bearer ${this.descriptor.deviceToken}\r\nContent-Type: ${contentType}\r\nAccept-Encoding: identity\r\n${extra}Connection: close\r\nContent-Length: ${body.length}\r\n\r\n`);
     return new Promise<T>((resolve, reject) => {
       const id = this.mux!.open();
       const abort = () => this.failRequest(id, new Error("操作已取消。"));
       const streaming = Boolean(options.responseType || options.rawBody);
-      const expired = () => this.failRequest(id, new Error("传输长时间没有进展，请重试。"));
+      const expired = () => this.failRequest(id, new TransferError("传输长时间没有进展，请重试。", true));
       let timeout = setTimeout(expired, streaming ? 180_000 : 30_000);
       const progress = () => { if (streaming) { clearTimeout(timeout); timeout = setTimeout(expired, 180_000); } };
       const cleanup = () => { clearTimeout(timeout); options.signal?.removeEventListener("abort", abort); };
-      this.pending.set(id, { binary: options.responseType === "bytes", limit: options.responseType ? MAX_FILE_BYTES + 1024 * 1024 : MAX_RESPONSE + 32 * 1024, chunks: [], bytes: 0, outgoing: Buffer.concat([head, body]), resolve: value => resolve(value as T), reject, cleanup, progress });
+      this.pending.set(id, { binary: options.responseType === "bytes", limit: options.responseType ? MAX_FILE_BYTES + 1024 * 1024 : MAX_RESPONSE + 32 * 1024, chunks: [], bytes: 0, outgoing: Buffer.concat([head, body]), resolve: value => resolve(value as T), reject, cleanup, progress, onProgress: options.onProgress });
       options.signal?.addEventListener("abort", abort, { once: true });
       this.flush(id);
     });
   }
-  close(): void {
+  close(error: Error = new TransferError("设备已断开连接。", true)): void {
     clearInterval(this.timer); clearTimeout(this.pingDeadline); clearTimeout(this.drain);
-    for (const pending of this.pending.values()) { pending.cleanup(); pending.reject(new Error("设备已断开连接。")); }
+    for (const pending of this.pending.values()) { pending.cleanup(); pending.reject(error); }
     this.pending.clear(); this.mux = undefined;
     this.socket.onclose = null; this.socket.onmessage = null; this.socket.onerror = null; this.socket.onopen = null;
     this.socket.close();
@@ -232,7 +248,7 @@ export function mobileRequestAllowed(method: string, path: string): boolean {
     const url = new URL(path, "https://mobile.invalid"), name = url.searchParams.get("name") ?? "";
     return url.pathname === "/api/files" && !url.hash && url.searchParams.size === 2
       && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(url.searchParams.get("uploadId") ?? "")
-      && /^[^/\\\x00-\x1f]{1,180}$/.test(name) && name !== "." && name !== "..";
+      && name.length > 0 && name.length <= 180 && !/[/\\]/.test(name) && [...name].every(char => char.charCodeAt(0) >= 32) && name !== "." && name !== "..";
   }
   if (method === "PATCH") return /^\/api\/routines\/[A-Za-z0-9_-]+$/.test(path);
   if (method === "POST") return /^\/api\/(bots|groups)\/[A-Za-z0-9_-]+\/(messages|read)$/.test(path)

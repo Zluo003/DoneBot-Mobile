@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { botSchema, messagePageSchema, workspaceSchema, type BinaryFile, type Bot, type Message, type MessagePage, type OfflineStorage, type Workspace } from "./contracts";
+import { botSchema, messagePageSchema, workspaceSchema, type BinaryFile, type Bot, type FileCheckpoint, type Message, type MessagePage, type OfflineStorage, type Workspace } from "./contracts";
 
 const snapshotSchema = z.object({
   version: z.literal(1), workspaces: z.array(workspaceSchema),
@@ -67,8 +67,22 @@ export class AccountCache {
     if (file) this.knownFiles.add(key); else this.knownFiles.delete(key);
     return file;
   }
-  putFile(key: string, file: BinaryFile): Promise<void> {
-    return this.write(async () => { await this.storage.writeFile(this.account, key, file); this.knownFiles.add(key); });
+  async putFile(key: string, file: BinaryFile): Promise<boolean> {
+    let committed = false;
+    await this.write(async () => { await this.storage.writeFile(this.account, key, file); this.knownFiles.add(key); committed = true; });
+    return committed;
+  }
+  async partial(key: string) {
+    if (this.closed) return null;
+    await this.writes;
+    const value = await this.storage.readPartial(this.account, key);
+    return this.closed ? null : value;
+  }
+  appendPartial(key: string, checkpoint: FileCheckpoint, data: Uint8Array): Promise<void> {
+    return this.write(() => this.storage.appendPartial(this.account, key, checkpoint, data));
+  }
+  clearPartial(key: string): Promise<void> {
+    return this.write(() => this.storage.clearPartial(this.account, key));
   }
   async close(remove = false): Promise<void> {
     this.closed = true;

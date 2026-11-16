@@ -1,6 +1,19 @@
 import { Directory, Encoding, Filesystem } from "@capacitor/filesystem";
 import { Buffer } from "buffer";
-import type { BinaryFile, OfflineStorage } from "../core/contracts";
+import type { BinaryFile, FileCheckpoint, OfflineStorage, PartialFile } from "../core/contracts";
+
+async function partialFile(value: FileCheckpoint | null, read: (part: number) => Promise<Uint8Array>): Promise<PartialFile | null> {
+  if (!value || typeof value.etag !== "string" || !/^"[^"\r\n]+"$/.test(value.etag)
+    || !Number.isSafeInteger(value.total) || value.total < 1 || value.total > 100 * 1024 * 1024
+    || !Number.isSafeInteger(value.parts) || value.parts < 1 || value.parts > 100
+    || !Number.isSafeInteger(value.received) || value.received < 1 || value.received > value.total
+    || typeof value.mime !== "string" || typeof value.name !== "string") return null;
+  try {
+    const chunks: Uint8Array[] = [];
+    for (let part = 0; part < value.parts; part++) chunks.push(await read(part));
+    return chunks.every(chunk => chunk instanceof Uint8Array && chunk.length > 0) && chunks.reduce((size, chunk) => size + chunk.length, 0) === value.received ? { checkpoint: value, chunks } : null;
+  } catch { return null; }
+}
 
 const directory = Directory.LibraryNoCloud;
 const missing = (error: unknown) => /not (?:exist|found)|doesn't exist|can't find (?:file|directory)|ENOENT/i.test(String((error as Error)?.message ?? error));
@@ -63,6 +76,23 @@ export const nativeOfflineStorage: OfflineStorage = {
     try { await Filesystem.rmdir({ directory, path: await accountRoot(account), recursive: true }); }
     catch (error) { if (!missing(error)) throw error; }
   },
+  async readPartial(account, key) {
+    const root = `${await fileRoot(account, key)}/partial`, raw = await readText(`${root}/manifest.json`);
+    if (!raw) return null;
+    try { return await partialFile(JSON.parse(raw), async part => {
+      const { data } = await Filesystem.readFile({ directory, path: `${root}/${part}` });
+      return typeof data === "string" ? new Uint8Array(Buffer.from(data, "base64")) : new Uint8Array(await data.arrayBuffer());
+    }); } catch { return null; }
+  },
+  async appendPartial(account, key, checkpoint, data) {
+    const root = `${await fileRoot(account, key)}/partial`;
+    await Filesystem.writeFile({ directory, path: `${root}/${checkpoint.parts - 1}`, data: Buffer.from(data).toString("base64"), recursive: true });
+    await Filesystem.writeFile({ directory, path: `${root}/manifest.json`, data: JSON.stringify(checkpoint), encoding: Encoding.UTF8 });
+  },
+  async clearPartial(account, key) {
+    try { await Filesystem.rmdir({ directory, path: `${await fileRoot(account, key)}/partial`, recursive: true }); }
+    catch (error) { if (!missing(error)) throw error; }
+  },
 };
 
 export function indexedDBStorage(name = "donebot-offline-v1"): OfflineStorage {
@@ -92,6 +122,19 @@ export function indexedDBStorage(name = "donebot-offline-v1"): OfflineStorage {
     async hasFile(account, key) { return Boolean(await operation("readonly", store => store.count([account, `file:${key}`]))); },
     async readFile(account, key) { return await operation<BinaryFile | undefined>("readonly", store => store.get([account, `file:${key}`])) ?? null; },
     async writeFile(account, key, file) { await operation("readwrite", store => store.put(file, [account, `file:${key}`])); },
+    async readPartial(account, key) {
+      const manifest = await operation<FileCheckpoint | undefined>("readonly", store => store.get([account, `partial:${key}`, "manifest"]));
+      return partialFile(manifest ?? null, part => operation("readonly", store => store.get([account, `partial:${key}`, part])));
+    },
+    async appendPartial(account, key, checkpoint, data) {
+      await operation("readwrite", store => {
+        store.put(data, [account, `partial:${key}`, checkpoint.parts - 1]);
+        return store.put(checkpoint, [account, `partial:${key}`, "manifest"]);
+      });
+    },
+    async clearPartial(account, key) {
+      await operation("readwrite", store => store.delete(IDBKeyRange.bound([account, `partial:${key}`], [account, `partial:${key}\0`], false, true)));
+    },
     async clear(account) { await operation("readwrite", store => store.delete(IDBKeyRange.bound([account], [account, "\uffff"]))); },
   };
 }
