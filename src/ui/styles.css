@@ -344,6 +344,10 @@ svg { flex-shrink: 0; }
 .page-body .sign-out span { flex: none; }
 .workspace-setting { display: flex; align-items: center; text-align: left; gap: 13px; width: 100%; min-height: 78px; border-top: 1px solid var(--color-edge); }
 .workspace-setting:first-child { border-top: 0; }
+.workspace-device + .workspace-device { border-top: 1px solid var(--color-edge); }
+.workspace-remove { padding: 0 0 14px 36px; display: flex; flex-wrap: wrap; gap: 8px; }
+.workspace-remove p { width: 100%; color: var(--color-ink-secondary); font-size: 12px; }
+.danger-button { color: var(--color-danger, #c33); }
 .workspace-setting > span { flex: 1; min-width: 0; }
 .workspace-setting strong { font-size: 14px; font-weight: 550; overflow-wrap: anywhere; }
 .workspace-setting small { display: flex; align-items: center; gap: 6px; color: var(--color-ink-secondary); font-size: 11px; margin-top: 7px; }

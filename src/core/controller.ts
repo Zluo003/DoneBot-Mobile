@@ -447,6 +447,21 @@ export class MobileController {
     if (epoch !== this.epoch || syncEpoch !== this.syncEpoch || this.state.offline) return;
     await Promise.all(this.state.workspaces.filter(workspace => workspace.online && (!workspaceId || workspace.id === workspaceId)).map(workspace => this.refreshBots(workspace)));
   }
+  async removeComputer(id: string): Promise<void> {
+    if (!this.state.session || this.state.offline) throw new Error("请联网后移除设备。");
+    const workspace = this.state.workspaces.find(item => item.id === id);
+    if (!workspace || workspace.kind !== "computer" || workspace.online) throw new Error("只能移除离线电脑。");
+    const epoch = this.epoch;
+    await this.api.removeComputer(id);
+    if (epoch !== this.epoch) return;
+    void this.connections.get(id)?.then(connection => connection.close(), () => {});
+    this.connections.delete(id);
+    const workspaces = this.state.workspaces.filter(item => item.id !== id);
+    this.updateDirectory(workspaces, this.state.bots.filter(bot => bot.workspace.id !== id),
+      Object.fromEntries(Object.entries(this.state.sections).filter(([key]) => key !== id)),
+      Object.fromEntries(Object.entries(this.state.sourceErrors).filter(([key]) => key !== id)));
+    await this.persistCache();
+  }
   async syncConversations(bots: Bot[], force = false): Promise<void> {
     const pending = [...bots], epoch = this.epoch, syncEpoch = this.syncEpoch;
     const current = () => epoch === this.epoch && syncEpoch === this.syncEpoch && this.visible && !this.state.offline;

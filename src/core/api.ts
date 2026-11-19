@@ -135,6 +135,9 @@ export class MobileApi {
     return result;
   }
   async workspaces() { return visibleWorkspaces(workspacesSchema.parse(await this.authorized("/api/v1/donebot/mobile/workspaces")).workspaces); }
+  async removeComputer(id: string): Promise<void> {
+    await this.authorized(`/api/v1/donebot/installations/${encodeURIComponent(id)}`, undefined, "DELETE");
+  }
   async presence(platform: string): Promise<void> {
     await this.authorized("/api/v1/donebot/mobile/session", { installationId: await this.installationId(), name: platform === "ios" ? "DoneBot iPhone" : "DoneBot Mobile", platform }, "PUT");
   }

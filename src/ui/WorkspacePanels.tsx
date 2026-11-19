@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft, CalendarClock, ChevronDown, ChevronRight, Cloud, Link, LoaderCircle, Menu, MessageSquare, Monitor, RefreshCw, Settings, X } from "lucide-react";
 import { automationKey, type ConnectedApp } from "../core/automations";
 import type { MobileController, State } from "../core/controller";
@@ -18,7 +18,7 @@ export function saveListDensity(value: ListDensity): void {
 
 export function WorkspacePicker({ state, source, onChange }: { state: State; source: Workspace; onChange(id: string): void }) {
   const online = source.online && !state.offline && !state.sourceErrors[source.id];
-  return <label className="workspace-dropdown">{source.kind === "cloud" ? <Cloud size={15} /> : <Monitor size={15} />}<select aria-label="切换电脑与 Cloud" value={source.id} onChange={event => onChange(event.target.value)}>{state.workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.kind === "cloud" ? "我的 Cloud" : workspace.name}</option>)}</select><i className={`workspace-dot ${online ? "online" : ""}`} role="img" aria-label={online ? "在线" : "离线"} /><ChevronDown size={15} /></label>;
+  return <label className="workspace-dropdown">{source.kind === "cloud" ? <Cloud size={15} /> : <Monitor size={15} />}<select aria-label="切换电脑与 Cloud" value={source.id} onChange={event => onChange(event.target.value)}>{state.workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name}{!workspace.online || state.offline || state.sourceErrors[workspace.id] ? " · 离线" : ""}</option>)}</select><i className={`workspace-dot ${online ? "online" : ""}`} role="img" aria-label={online ? "在线" : "离线"} /><ChevronDown size={15} /></label>;
 }
 
 export function PanelFrame({ title, children, back, action }: { title: string; children: ReactNode; back(): void; action?: ReactNode }) {
@@ -48,6 +48,15 @@ function appStatus(app: ConnectedApp): string {
 const nextRun = (at: number) => new Date(at).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
 
 export function WorkspacePage({ page, state, controller, source, onWorkspace, back }: { page: "automations" | "apps" | "workspaces"; state: State; controller: MobileController; source?: Workspace; onWorkspace(id: string): void; back(): void }) {
+  const [removing, setRemoving] = useState("");
+  const [confirmRemove, setConfirmRemove] = useState("");
+  const [removeError, setRemoveError] = useState("");
+  const remove = async (id: string) => {
+    setRemoving(id); setRemoveError("");
+    try { await controller.removeComputer(id); setConfirmRemove(""); }
+    catch (error) { setRemoveError(error instanceof Error ? error.message : "无法移除设备，请稍后重试。"); }
+    finally { setRemoving(""); }
+  };
   const key = `${page}/${source?.id ?? ""}`;
   const busy = state.workspaceLoading[key];
   useEffect(() => {
@@ -62,9 +71,9 @@ export function WorkspacePage({ page, state, controller, source, onWorkspace, ba
   const canEdit = Boolean(source?.online && !state.offline && !state.sourceErrors[source.id]);
   return <PanelFrame title={page === "automations" ? "自动化工作" : page === "apps" ? "已连接的应用程序" : "电脑与 Cloud"} back={back} action={<button className="icon-button" aria-label="刷新列表" disabled={busy} onClick={() => void refresh()}><RefreshCw size={19} className={busy ? "spin" : ""} /></button>}>
     {page !== "workspaces" && source && <div className="page-workspace"><WorkspacePicker state={state} source={source} onChange={onWorkspace} /></div>}
-    {page === "workspaces" ? <><div className="settings-group">{state.workspaces.map(workspace => {
+    {page === "workspaces" ? <>{removeError && <p className="panel-error" role="alert">{removeError}</p>}<div className="settings-group">{state.workspaces.map(workspace => {
       const online = workspace.online && !state.offline && !state.sourceErrors[workspace.id];
-      return <button key={workspace.id} className="workspace-setting" onClick={() => { onWorkspace(workspace.id); back(); }}>{workspace.kind === "cloud" ? <Cloud size={23} /> : <Monitor size={23} />}<span><strong>{workspace.name}</strong><small><i className={`workspace-dot ${online ? "online" : ""}`} />{online ? "在线" : "离线"}{workspace.id === source?.id ? " · 当前工作空间" : ""}</small></span><ChevronRight size={17} /></button>;
+      return <div key={workspace.id} className="workspace-device"><button className="workspace-setting" onClick={() => { onWorkspace(workspace.id); back(); }}>{workspace.kind === "cloud" ? <Cloud size={23} /> : <Monitor size={23} />}<span><strong>{workspace.name}</strong><small><i className={`workspace-dot ${online ? "online" : ""}`} />{online ? "在线" : "离线"}{workspace.id === source?.id ? " · 当前工作空间" : ""}</small><small>设备编号：{workspace.id.slice(0, 8)}</small></span><ChevronRight size={17} /></button>{workspace.kind === "computer" && !workspace.online && !state.offline && <div className="workspace-remove">{confirmRemove === workspace.id ? <><p>移除后这台电脑需要重新登录。电脑里的聊天和文件会保留。</p><button className="outline-button" disabled={Boolean(removing)} onClick={() => setConfirmRemove("")}>取消</button><button className="outline-button danger-button" disabled={Boolean(removing)} onClick={() => void remove(workspace.id)}>{removing === workspace.id ? "正在移除…" : "确认移除"}</button></> : <button className="outline-button" onClick={() => setConfirmRemove(workspace.id)}>移除旧设备</button>}</div>}</div>;
     })}</div>{!state.workspaces.length && <p className="panel-empty">暂无已连接的电脑或 Cloud。</p>}</>
       : !source ? <p className="panel-empty">连接电脑或 Cloud 后即可查看。</p> : <>
         {state.workspaceErrors[key] && <p className="panel-error" role="alert">{state.workspaceErrors[key]}</p>}

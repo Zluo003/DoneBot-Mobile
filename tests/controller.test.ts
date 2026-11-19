@@ -60,6 +60,44 @@ function fixture() {
 }
 
 describe("conversation isolation", () => {
+  it("keeps offline devices with their saved names without merging devices that share a name", async () => {
+    const fx = fixture();
+    fx.workspace.name = "家里的电脑";
+    fx.workspaces.push({ ...fx.workspace, id: "offline-one", online: false }, { ...fx.workspace, id: "offline-two", online: false });
+    await fx.login();
+    expect(fx.controller.snapshot().workspaces.map(({ id, name, online }) => ({ id, name, online }))).toEqual([
+      { id: "computer", name: "家里的电脑", online: true },
+      { id: "offline-one", name: "家里的电脑", online: false },
+      { id: "offline-two", name: "家里的电脑", online: false },
+    ]);
+    expect(fx.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it("removes only an offline computer after a successful account-scoped request", async () => {
+    const fx = fixture();
+    fx.workspaces.push({ ...fx.workspace, id: "old-computer", online: false });
+    await fx.login();
+    await expect(fx.controller.removeComputer("computer")).rejects.toThrow("只能移除离线电脑");
+    const remove = vi.spyOn(fx.api, "removeComputer").mockRejectedValueOnce(new Error("Synthetic removal failed")).mockResolvedValue(undefined);
+    await expect(fx.controller.removeComputer("old-computer")).rejects.toThrow("Synthetic removal failed");
+    expect(fx.controller.snapshot().workspaces).toHaveLength(2);
+    await fx.controller.removeComputer("old-computer");
+    expect(remove).toHaveBeenCalledWith("old-computer");
+    expect(fx.controller.snapshot().workspaces.map(workspace => workspace.id)).toEqual(["computer"]);
+  });
+
+  it("does not apply an old removal response to a signed-out account", async () => {
+    const fx = fixture(), held = deferred<void>();
+    fx.workspaces.push({ ...fx.workspace, id: "old-computer", online: false });
+    await fx.login();
+    vi.spyOn(fx.api, "removeComputer").mockReturnValue(held.promise);
+    const removing = fx.controller.removeComputer("old-computer");
+    await fx.controller.logout();
+    held.resolve(); await removing;
+    expect(fx.controller.snapshot().session).toBeNull();
+    expect(fx.controller.snapshot().workspaces).toEqual([]);
+  });
+
   it("opens the latest Bot reply across conversations and keeps explicit choices, drafts and sends independent", async () => {
     const fx = fixture(), original = fx.request.getMockImplementation()!;
     const tasks = [{ threadId: "thread-one", title: "原对话", updatedAt: 500 }, { threadId: "other-one", title: "新工作", updatedAt: 300, unread: true }];
