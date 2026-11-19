@@ -18,6 +18,13 @@ Debug 使用 `development` APNs entitlement 与 `sandbox` token 环境；Release
 上架前必须接通 `docs/mobile-api.md` 的正式服务、配置真实签名，并用真实设备完成登录、跨网络连接、后台消息提醒和通知冷启动检查。当前工程可作为首版客户端继续开发，尚不是已连通正式中枢的可发布版本。
 
 
+## Xcode Cloud 构建
+
+`ios/App/ci_scripts/ci_post_clone.sh` 在检出后按 `package.json` 指定的 pnpm 版本及 `pnpm-lock.yaml` 安装依赖，再运行 `pnpm ios:sync`。该步骤生成 Web 资源，并为 Swift Package Manager 准备 `node_modules` 中的 Capacitor 插件。
+
+在包含该脚本的远程提交上启动使用 `App` scheme 的工作流。需要把构建上传到 App Store Connect 时，添加 iOS 的 **Archive** 操作，并把 **Deployment Preparation** 设为 **TestFlight and App Store**。
+
+
 ## 在线状态与消息提醒
 
 冷启动先读取本机缓存，立即请求网关状态，不等待手机心跳或所有电脑的列表请求完成。前台每 4 秒检查状态，手机会话心跳至少相隔 15 秒；切换电脑 / Cloud 时立即刷新网关和目标列表。电脑和 Cloud 各自同步，一台连接超时不拖住另一台。
