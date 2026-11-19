@@ -10,6 +10,22 @@ const login = { access_token: "synthetic-access", refresh_token: "synthetic-refr
 afterEach(() => vi.unstubAllGlobals());
 
 describe("account isolation", () => {
+  it("removes the mobile workspace registration without revoking the computer login", async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json({ code: 0, data: login })).mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetcher);
+    const api = new MobileApi(vault());
+    await api.login("one@fixture.test", "synthetic");
+    await api.removeComputer("offline-computer");
+    expect(fetcher.mock.calls[1][0]).toBe("https://donebot.cn/api/v1/donebot/mobile/workspaces/offline-computer");
+    expect(fetcher.mock.calls[1][1]).toMatchObject({ method: "DELETE", headers: { authorization: "Bearer synthetic-access" } });
+    expect(api.current()?.account.id).toBe("1");
+  });
+  it("explains when a computer reconnects before removal reaches the gateway", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(Response.json({ code: 0, data: login })).mockResolvedValueOnce(Response.json({ reason: "MOBILE_COMPUTER_ONLINE" }, { status: 409 })));
+    const api = new MobileApi(vault());
+    await api.login("one@fixture.test", "synthetic");
+    await expect(api.removeComputer("computer")).rejects.toThrow("已恢复在线");
+  });
   it("uses one installation when workspace connections start concurrently", async () => {
     const storage = vault(); const api = new MobileApi(storage);
     const ids = await Promise.all([api.installationId(), api.installationId(), api.installationId()]);

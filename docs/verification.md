@@ -255,3 +255,20 @@ PDF 文件入口、发送和原会话回执、视频 480×270／1 秒解码、�
 手机测试覆盖本机/Cloud 四类媒体重连、前后台、持久断点、版本变化、权限拒绝、原生磁盘清单中断、存储不足、慢传输和有界重试。15 个测试文件共 131 项通过，TypeScript 和修改文件的 oxlint 检查通过。`pnpm ios:build` 完成模拟器构建，日志在 `.build-resumable-ios.log`。
 
 桌面仓库新增 `server/message-file-range.e2e.test.ts`。网关隔离集成流程通过真实独立中继主动打断四类超过 2 MiB 的下载，重新建连后从第二段续传，结果逐字节相同。完整运行方式和证据说明见同级 DoneBot 的 `docs/verification/mobile-file-resume.md`。需要更新手机 App 和文件来源的运行服务；未安装到用户手机，也未更新线上 Cloud。
+
+
+## 手机移除离线电脑（2026-11-19）
+
+手机“电脑与 Cloud”列表仅对离线电脑提供“移除电脑”，确认文案说明电脑再次打开
+DoneBot 后自动连接，聊天和文件保留。调用独立的手机工作空间移除接口，保留安装凭据。
+
+- `pnpm exec vitest run --maxWorkers=1`：16 个文件、140 项通过；`pnpm build` 和 `pnpm exec cap sync ios` 通过。
+- 临时 PostgreSQL 的移除/恢复、在线状态竞态、Cloud/跨账号/失效会话拒绝、重装身份恢复检查通过。
+- 原版隔离运行服务与独立中继完整工作流通过：暂停心跳、移除记录、恢复心跳、同身份自动登记，旧授权失效，重新授权后原消息和文件保留且无重复设备。
+- Playwright 的 390×844 合成页面检查通过：离线电脑有入口，在线电脑和 Cloud 无入口；取消保留设备，确认后设备同时从设置列表和切换列表消失。
+
+网页快照位于 `.playwright-cli/page-2026-11-19T09-18-21-590Z.yml`。完整链路证据在同级 DoneBot
+`.omb-scratch/verify-evidence/mobile-hub/evidence.json`，服务日志为
+`/var/folders/wf/gs6jc_rd4qd_6_1jmqjkg1jh0000gn/T/donebot-verification-evidence/server-1795078558419-43219.log`。
+没有操作用户线上设备；未验证物理电脑重启或真机 iPhone。发布需要更新手机 App 和网关，
+电脑端现有心跳支持恢复登记，无需新版本。

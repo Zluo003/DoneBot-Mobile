@@ -32,6 +32,7 @@ export class MobileController {
   private listeners = new Set<() => void>();
   private epoch = 0;
   private historyEpoch = 0;
+  private directoryVersion = 0;
   private connections = new Map<string, Promise<WorkspaceConnection>>();
   private cachedMessages = new Map<string, { messages: Message[]; hasMore: boolean }>();
   private conversationChecks = new Map<string, { version: string; at: number }>();
@@ -330,8 +331,8 @@ export class MobileController {
   }
   private async discover(): Promise<void> {
     if (this.refreshFlight) return this.refreshFlight;
-    const epoch = this.epoch, syncEpoch = this.syncEpoch;
-    const current = () => epoch === this.epoch && syncEpoch === this.syncEpoch;
+    const epoch = this.epoch, syncEpoch = this.syncEpoch, version = this.directoryVersion;
+    const current = () => epoch === this.epoch && syncEpoch === this.syncEpoch && version === this.directoryVersion;
     const flight = (async () => {
       try {
         if (typeof navigator !== "undefined" && navigator.onLine === false) throw new Error("当前离线，可查看已缓存的消息和附件。");
@@ -454,6 +455,7 @@ export class MobileController {
     const epoch = this.epoch;
     await this.api.removeComputer(id);
     if (epoch !== this.epoch) return;
+    ++this.directoryVersion;
     void this.connections.get(id)?.then(connection => connection.close(), () => {});
     this.connections.delete(id);
     const workspaces = this.state.workspaces.filter(item => item.id !== id);

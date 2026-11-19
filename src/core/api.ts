@@ -74,6 +74,7 @@ export class MobileApi {
         ? "网关尚未启用 Apple 消息推送，请在管理后台配置 APNs 后重试。"
         : reason === "MOBILE_RELAY_OFFLINE" ? "中继节点暂时离线，请稍后重新连接。"
         : reason === "MOBILE_UNAVAILABLE" ? "网关尚未配置手机连接，请联系管理员。"
+        : reason === "MOBILE_COMPUTER_ONLINE" ? "这台电脑已恢复在线，不能移除。请刷新列表。"
         : response.status === 401 ? (path === "/api/v1/auth/login" ? "邮箱或密码不正确。" : path === "/api/v1/auth/login/2fa" ? "验证码不正确或已过期。" : "登录状态已失效，请重新登录。") : response.status === 404 || response.status === 501
         ? "手机连接服务尚未启用，请稍后重试。" : response.status === 429 ? "操作较频繁，请稍后重试。" : "暂时无法完成请求，请稍后重试。";
       throw new ApiError(response.status, text);
@@ -136,7 +137,7 @@ export class MobileApi {
   }
   async workspaces() { return visibleWorkspaces(workspacesSchema.parse(await this.authorized("/api/v1/donebot/mobile/workspaces")).workspaces); }
   async removeComputer(id: string): Promise<void> {
-    await this.authorized(`/api/v1/donebot/installations/${encodeURIComponent(id)}`, undefined, "DELETE");
+    await this.authorized(`/api/v1/donebot/mobile/workspaces/${encodeURIComponent(id)}`, undefined, "DELETE");
   }
   async presence(platform: string): Promise<void> {
     await this.authorized("/api/v1/donebot/mobile/session", { installationId: await this.installationId(), name: platform === "ios" ? "DoneBot iPhone" : "DoneBot Mobile", platform }, "PUT");

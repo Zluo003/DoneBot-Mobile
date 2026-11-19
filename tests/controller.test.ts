@@ -84,6 +84,36 @@ describe("conversation isolation", () => {
     await fx.controller.removeComputer("old-computer");
     expect(remove).toHaveBeenCalledWith("old-computer");
     expect(fx.controller.snapshot().workspaces.map(workspace => workspace.id)).toEqual(["computer"]);
+    fx.workspaces[1].online = true;
+    await fx.controller.refresh();
+    expect(fx.controller.snapshot().workspaces.map(workspace => workspace.id)).toEqual(["computer", "old-computer"]);
+    expect(fx.controller.snapshot().workspaces[1].online).toBe(true);
+    expect(fx.api.current()).not.toBeNull();
+  });
+
+  it("rejects Cloud and phone-offline removal without sending a delete request", async () => {
+    const fx = fixture();
+    fx.workspaces.push({ ...fx.workspace, id: "cloud", kind: "cloud", online: false });
+    await fx.login();
+    const remove = vi.spyOn(fx.api, "removeComputer");
+    await expect(fx.controller.removeComputer("cloud")).rejects.toThrow("只能移除离线电脑");
+    vi.spyOn(fx.api, "workspaces").mockRejectedValue(new Error("synthetic network outage"));
+    await fx.controller.refresh();
+    await expect(fx.controller.removeComputer("computer")).rejects.toThrow("请联网后移除设备");
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it("does not restore a removed computer from an older discovery response", async () => {
+    const fx = fixture(), held = deferred<Awaited<ReturnType<MobileApi["workspaces"]>>>();
+    fx.workspaces.push({ ...fx.workspace, id: "old-computer", online: false });
+    await fx.login();
+    vi.spyOn(fx.api, "workspaces").mockReturnValueOnce(held.promise);
+    vi.spyOn(fx.api, "removeComputer").mockResolvedValue(undefined);
+    const refreshing = fx.controller.refresh();
+    await fx.controller.removeComputer("old-computer");
+    held.resolve(fx.workspaces as Awaited<ReturnType<MobileApi["workspaces"]>>);
+    await refreshing;
+    expect(fx.controller.snapshot().workspaces.map(workspace => workspace.id)).toEqual(["computer"]);
   });
 
   it("does not apply an old removal response to a signed-out account", async () => {

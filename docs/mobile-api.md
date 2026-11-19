@@ -38,6 +38,16 @@
 
 `kind` 为 `computer` 或 `cloud`。服务端从真实实例归属与开通状态投影 Cloud 列表；不创建未开通实例。客户端另有 `provisioned` 过滤。手机协议没有购买或开通接口。
 
+### DELETE `/api/v1/donebot/mobile/workspaces/:id`
+
+在手机“电脑与 Cloud”列表移除离线电脑，无请求体，成功返回 204。网关逐次验证
+当前登录会话、账号归属及电脑离线状态。在线电脑返回 409 `MOBILE_COMPUTER_ONLINE`，
+Cloud 和其他账号的设备不可移除。同账号重复移除已消失的电脑记录返回 204。
+
+仅删除手机中枢的电脑连接记录、关联手机授权与待发通知，保留电脑安装 ID、登录凭据、
+聊天及文件。电脑再次打开 DoneBot 或恢复联网并发送心跳后，以同一身份自动登记回来，
+手机重新获取连接授权；不要求重新登录。这不是安装凭据吊销接口，真正已吊销或禁用的安装不能自动恢复。
+
 ### POST `/api/v1/donebot/mobile/workspaces/:id/connection`
 
 请求体 `{ "installationId": "random-installation-uuid" }`，返回桌面原版协议的连接描述：

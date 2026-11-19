@@ -43,6 +43,11 @@ const histories = new Map([
   ["thread-ahe", [{ id: "a1", role: "bot", kind: "text", text: "资料已经按主题归档，三份重点摘要也准备好了。", timestamp: at(58) }]],
 ]);
 const received = new Set();
+const offlineComputers = process.env.MOBILE_DEVICES_FIXTURE === "1" ? [
+  { id: "offline-home", name: "家里的电脑", kind: "computer", online: false, provisioned: true },
+  { id: "offline-office", name: "办公室电脑", kind: "computer", online: false, provisioned: true },
+] : [];
+const removedComputers = new Set();
 const files = new Map();
 for (const [name, mime] of [["photo.png", "image/png"], ["demo.mp4", "video/mp4"], ["note.wav", "audio/wav"], ["guide.pdf", "application/pdf"], ["notes.txt", "text/plain"]]) {
   files.set(`/fixture/${name}`, { bytes: await readFile(new URL(`../tests/fixtures/media/${name}`, import.meta.url)), mime, name });
@@ -181,8 +186,13 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === "/api/v1/auth/refresh") return json(res, 200, { code: 0, data: { access_token: "fixture-access", refresh_token: "fixture-refresh", expires_in: 3600 } });
     if (req.headers.authorization !== "Bearer fixture-access") return json(res, 401, {});
     if (url.pathname === "/api/v1/auth/logout") return json(res, 200, {});
+    const removal = /^\/api\/v1\/donebot\/mobile\/workspaces\/(offline-home|offline-office)$/.exec(url.pathname);
+    if (removal && req.method === "DELETE" && offlineComputers.some(workspace => workspace.id === removal[1])) {
+      removedComputers.add(removal[1]); res.writeHead(204); res.end(); return;
+    }
     if (url.pathname === "/api/v1/donebot/mobile/workspaces") return json(res, 200, { workspaces: [
       { id: "macbook", name: "MacBook Pro", kind: "computer", online: true, provisioned: true },
+      ...offlineComputers.filter(workspace => !removedComputers.has(workspace.id)),
       ...(!desktopFixture ? [{ id: "cloud", name: "DoneBot Cloud", kind: "cloud", online: true, provisioned: true }] : []),
       { id: "hidden-cloud", name: "尚未开通的 Cloud", kind: "cloud", online: false, provisioned: false },
     ] });

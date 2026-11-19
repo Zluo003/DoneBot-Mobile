@@ -73,7 +73,20 @@ export function WorkspacePage({ page, state, controller, source, onWorkspace, ba
     {page !== "workspaces" && source && <div className="page-workspace"><WorkspacePicker state={state} source={source} onChange={onWorkspace} /></div>}
     {page === "workspaces" ? <>{removeError && <p className="panel-error" role="alert">{removeError}</p>}<div className="settings-group">{state.workspaces.map(workspace => {
       const online = workspace.online && !state.offline && !state.sourceErrors[workspace.id];
-      return <div key={workspace.id} className="workspace-device"><button className="workspace-setting" onClick={() => { onWorkspace(workspace.id); back(); }}>{workspace.kind === "cloud" ? <Cloud size={23} /> : <Monitor size={23} />}<span><strong>{workspace.name}</strong><small><i className={`workspace-dot ${online ? "online" : ""}`} />{online ? "在线" : "离线"}{workspace.id === source?.id ? " · 当前工作空间" : ""}</small><small>设备编号：{workspace.id.slice(0, 8)}</small></span><ChevronRight size={17} /></button>{workspace.kind === "computer" && !workspace.online && !state.offline && <div className="workspace-remove">{confirmRemove === workspace.id ? <><p>移除后这台电脑需要重新登录。电脑里的聊天和文件会保留。</p><button className="outline-button" disabled={Boolean(removing)} onClick={() => setConfirmRemove("")}>取消</button><button className="outline-button danger-button" disabled={Boolean(removing)} onClick={() => void remove(workspace.id)}>{removing === workspace.id ? "正在移除…" : "确认移除"}</button></> : <button className="outline-button" onClick={() => setConfirmRemove(workspace.id)}>移除旧设备</button>}</div>}</div>;
+      return <div key={workspace.id} className="workspace-device">
+        <button className="workspace-setting" onClick={() => { onWorkspace(workspace.id); back(); }}>
+          {workspace.kind === "cloud" ? <Cloud size={23} /> : <Monitor size={23} />}
+          <span><strong>{workspace.name}</strong><small><i className={`workspace-dot ${online ? "online" : ""}`} />{online ? "在线" : "离线"}{workspace.id === source?.id ? " · 当前工作空间" : ""}</small><small>设备编号：{workspace.id.slice(0, 8)}</small></span>
+          <ChevronRight size={17} />
+        </button>
+        {workspace.kind === "computer" && !workspace.online && !state.offline && <div className="workspace-remove">
+          {confirmRemove === workspace.id ? <>
+            <p>移除后，这台电脑下次打开 DoneBot 会自动重新连接。电脑里的聊天和文件会保留。</p>
+            <button className="outline-button" disabled={Boolean(removing)} onClick={() => setConfirmRemove("")}>取消</button>
+            <button className="outline-button danger-button" disabled={Boolean(removing)} onClick={() => void remove(workspace.id)}>{removing === workspace.id ? "正在移除…" : "确认移除"}</button>
+          </> : <button className="outline-button" aria-label={`移除电脑 ${workspace.name} ${workspace.id.slice(0, 8)}`} disabled={Boolean(removing)} onClick={() => setConfirmRemove(workspace.id)}>移除电脑</button>}
+        </div>}
+      </div>;
     })}</div>{!state.workspaces.length && <p className="panel-empty">暂无已连接的电脑或 Cloud。</p>}</>
       : !source ? <p className="panel-empty">连接电脑或 Cloud 后即可查看。</p> : <>
         {state.workspaceErrors[key] && <p className="panel-error" role="alert">{state.workspaceErrors[key]}</p>}
